@@ -73,6 +73,8 @@ pub struct MicroVmBuilder {
     mtu: Option<usize>,
     extra_hosts: Vec<(String, String)>,
     shm_size: Option<String>,
+    approval_policy: Option<crate::net::ApprovalPolicy>,
+    approval_store: Option<std::sync::Arc<crate::net::ApprovalStore>>,
 }
 
 impl MicroVmBuilder {
@@ -121,6 +123,8 @@ impl MicroVmBuilder {
             mtu: None,
             extra_hosts: Vec::new(),
             shm_size: None,
+            approval_policy: None,
+            approval_store: None,
         }
     }
 
@@ -489,6 +493,32 @@ impl MicroVmBuilder {
     /// Sets a hard ceiling on cumulative LLM tokens (prompt + completion) consumed by the microVM.
     pub fn max_tokens(mut self, limit: u64) -> Self {
         self.max_tokens = Some(limit);
+        self
+    }
+
+    /// Configures Human-in-the-Loop (HITL) approval policy for the microVM.
+    pub fn approval_policy(mut self, policy: crate::net::ApprovalPolicy) -> Self {
+        self.approval_policy = Some(policy);
+        self
+    }
+
+    /// Sets a shared ApprovalStore for tracking and deciding on intercepted requests.
+    pub fn approval_store(mut self, store: std::sync::Arc<crate::net::ApprovalStore>) -> Self {
+        self.approval_store = Some(store);
+        self
+    }
+
+    /// Enables Human-in-the-Loop (HITL) manual approval for all mutating / destructive agent operations.
+    pub fn hitl(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.approval_policy = Some(
+                crate::net::ApprovalPolicy::new()
+                    .with_trigger(crate::net::ApprovalTrigger::AllMutating)
+                    .with_trigger(crate::net::ApprovalTrigger::DestructiveKeywords),
+            );
+        } else {
+            self.approval_policy = None;
+        }
         self
     }
 
@@ -930,10 +960,11 @@ impl MicroVmBuilder {
             )?;
         }
 
-        // 5e. Start host egress proxy server if filtering, secrets, or token budget are specified
+        // 5e. Start host egress proxy server if filtering, secrets, token budget, or approvals are specified
         let (egress_proxy, proxy_port) = if !self.allow_hosts.is_empty()
             || !self.secrets.is_empty()
             || self.max_tokens.is_some()
+            || self.approval_policy.is_some()
         {
             let policy = crate::net::EgressPolicy::new(self.allow_hosts.clone());
             let secrets = crate::net::SecretSubstitution::new(&self.secrets);

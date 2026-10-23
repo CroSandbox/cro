@@ -270,6 +270,10 @@ enum Commands {
         #[arg(long = "max-tokens")]
         max_tokens: Option<u64>,
 
+        /// Enable Human-in-the-Loop (HITL) approval pause/resume for mutating agent requests (OneCLI model)
+        #[arg(long = "hitl", alias = "approvals")]
+        hitl: bool,
+
         /// Enable hardware-accelerated virtio-gpu (Apple Silicon Metal / Linux DRM Venus)
         #[arg(long)]
         gpu: bool,
@@ -611,6 +615,55 @@ enum Commands {
     Kube {
         #[command(subcommand)]
         command: KubeCommands,
+    },
+
+    /// Manage Human-in-the-Loop (HITL) approval requests for intercepted agent actions
+    Approval {
+        #[command(subcommand)]
+        command: ApprovalCommands,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ApprovalCommands {
+    /// List pending or historical human approval requests
+    #[command(name = "ls", alias = "list")]
+    List {
+        /// Show full history (including approved, denied, and timed-out requests)
+        #[arg(long, short = 'a')]
+        all: bool,
+
+        /// Format output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Approve an intercepted pending request
+    Approve {
+        /// ID of the pending approval (e.g. appr_000001)
+        id: String,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Deny an intercepted pending request
+    Deny {
+        /// ID of the pending approval (e.g. appr_000001)
+        id: String,
+
+        /// Optional reason for denial
+        #[arg(long, short = 'r')]
+        reason: Option<String>,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
     },
 }
 
@@ -1267,6 +1320,7 @@ async fn main() -> Result<()> {
             secrets,
             allow_hosts,
             max_tokens,
+            hitl,
             gpu,
             gpu_shm_size,
             shm_size,
@@ -1287,6 +1341,16 @@ async fn main() -> Result<()> {
                 .tty(true)
                 .workspace_cow(&abs_ws, "workspace")
                 .workdir("/workspace");
+
+            let effective_data_dir = data_dir.clone().unwrap_or_else(default_data_dir);
+            if hitl {
+                let approval_dir = effective_data_dir.join("approvals");
+                let store = std::sync::Arc::new(
+                    microvm_core::net::ApprovalStore::new().with_storage_dir(&approval_dir),
+                );
+                builder = builder.hitl(true).approval_store(store);
+                println!("🔒 Human-in-the-Loop (HITL) Interception: ENABLED (review via 'cro approval list')");
+            }
 
             if let Some(ref dd) = data_dir {
                 builder = builder.data_dir(dd.clone());
@@ -2624,6 +2688,67 @@ fi"#
                 println!("✅ Pod containers successfully terminated.");
             }
         },
+
+        Commands::Approval { command } => match command {
+            ApprovalCommands::List { all, json, data_dir } => {
+                let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+                let approval_dir = base_data_dir.join("approvals");
+
+                if all {
+                    let store = microvm_core::net::ApprovalStore::new().with_storage_dir(&approval_dir);
+                    let history = store.get_history().await;
+                    let pending = microvm_core::net::ApprovalStore::cli_list_pending(&approval_dir).unwrap_or_default();
+                    let mut combined = pending;
+                    combined.extend(history);
+
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&combined)?);
+                    } else if combined.is_empty() {
+                        println!("No pending or historical approval requests found.");
+                    } else {
+                        println!("{:<14} {:<12} {:<8} {:<28} {:<10} SUMMARY", "ID", "AGENT/VM", "METHOD", "DESTINATION", "STATUS");
+                        println!("{}", "-".repeat(90));
+                        for item in &combined {
+                            let status_str = format!("{:?}", item.status);
+                            let dest = format!("{}:{}", item.host, item.port);
+                            println!("{:<14} {:<12} {:<8} {:<28} {:<10} {}", item.id, item.agent_or_vm_id, item.method, dest, status_str, item.summary);
+                        }
+                    }
+                } else {
+                    let pending = microvm_core::net::ApprovalStore::cli_list_pending(&approval_dir)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&pending)?);
+                    } else if pending.is_empty() {
+                        println!("✨ No pending requests awaiting approval.");
+                    } else {
+                        println!("{:<14} {:<12} {:<8} {:<28} SUMMARY", "ID", "AGENT/VM", "METHOD", "DESTINATION");
+                        println!("{}", "-".repeat(80));
+                        for item in &pending {
+                            let dest = format!("{}:{}", item.host, item.port);
+                            println!("{:<14} {:<12} {:<8} {:<28} {}", item.id, item.agent_or_vm_id, item.method, dest, item.summary);
+                        }
+                        println!("\nTo approve: cro approval approve <id>");
+                        println!("To deny:    cro approval deny <id>");
+                    }
+                }
+            }
+            ApprovalCommands::Approve { id, data_dir } => {
+                let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+                let approval_dir = base_data_dir.join("approvals");
+                microvm_core::net::ApprovalStore::cli_decide(&approval_dir, &id, true)?;
+                println!("✅ Approved request '{}'! Intercepted connection resumed.", id);
+            }
+            ApprovalCommands::Deny { id, reason, data_dir } => {
+                let base_data_dir = data_dir.unwrap_or_else(default_data_dir);
+                let approval_dir = base_data_dir.join("approvals");
+                microvm_core::net::ApprovalStore::cli_decide(&approval_dir, &id, false)?;
+                if let Some(r) = reason {
+                    println!("❌ Denied request '{}' (Reason: {}). Connection terminated with HTTP 403.", id, r);
+                } else {
+                    println!("❌ Denied request '{}'. Connection terminated with HTTP 403.", id);
+                }
+            }
+        },
     }
 
     Ok(())
@@ -3827,7 +3952,7 @@ fn parse_disk_arg(arg: &str, disk_index: usize) -> (String, PathBuf, bool) {
 fn parse_secret_arg(arg: &str) -> Result<(String, String)> {
     let (key, value_spec) = arg.split_once('=').ok_or_else(|| {
         anyhow::anyhow!(
-            "Invalid secret format '{}'. Expected KEY=VALUE, KEY=env:VAR_NAME, or KEY=file:/path",
+            "Invalid secret format '{}'. Expected KEY=VALUE, KEY=env:VAR_NAME, KEY=op://..., KEY=bw://..., or KEY=file:/path",
             arg
         )
     })?;
@@ -3837,30 +3962,7 @@ fn parse_secret_arg(arg: &str) -> Result<(String, String)> {
         bail!("Secret key cannot be empty in '{}'", arg);
     }
 
-    let value = if let Some(env_var) = value_spec.strip_prefix("env:") {
-        std::env::var(env_var).map_err(|_| {
-            anyhow::anyhow!(
-                "Environment variable '{}' for secret '{}' is not set",
-                env_var,
-                key
-            )
-        })?
-    } else if let Some(file_path) = value_spec.strip_prefix("file:") {
-        std::fs::read_to_string(file_path)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to read secret file '{}' for secret '{}': {}",
-                    file_path,
-                    key,
-                    e
-                )
-            })?
-            .trim_end_matches(['\r', '\n'])
-            .to_string()
-    } else {
-        value_spec.to_string()
-    };
-
+    let value = microvm_core::net::VaultResolver::resolve(value_spec)?;
     Ok((key.to_string(), value))
 }
 
@@ -4440,6 +4542,66 @@ mod tests {
                 assert_eq!(shm_size.as_deref(), Some("1g"));
             }
             _ => panic!("Expected Commands::Sandbox with enhanced features"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_sandbox_hitl() {
+        let sandbox_args = vec![
+            "microvm",
+            "sandbox",
+            "claude",
+            "--hitl",
+            "--secret",
+            "ANTHROPIC_API_KEY=env:ANTHROPIC_API_KEY",
+        ];
+        let cli = Cli::try_parse_from(sandbox_args).unwrap();
+        match cli.command {
+            Commands::Sandbox { agent, hitl, secrets, .. } => {
+                assert_eq!(agent, "claude");
+                assert!(hitl);
+                assert_eq!(secrets, vec!["ANTHROPIC_API_KEY=env:ANTHROPIC_API_KEY".to_string()]);
+            }
+            _ => panic!("Expected Commands::Sandbox with hitl"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_approval_commands() {
+        // 1. List
+        let list_args = vec!["microvm", "approval", "ls", "--all"];
+        let cli = Cli::try_parse_from(list_args).unwrap();
+        match cli.command {
+            Commands::Approval { command } => match command {
+                ApprovalCommands::List { all, .. } => assert!(all),
+                _ => panic!("Expected ApprovalCommands::List"),
+            },
+            _ => panic!("Expected Commands::Approval"),
+        }
+
+        // 2. Approve
+        let approve_args = vec!["microvm", "approval", "approve", "appr_000001"];
+        let cli2 = Cli::try_parse_from(approve_args).unwrap();
+        match cli2.command {
+            Commands::Approval { command } => match command {
+                ApprovalCommands::Approve { id, .. } => assert_eq!(id, "appr_000001"),
+                _ => panic!("Expected ApprovalCommands::Approve"),
+            },
+            _ => panic!("Expected Commands::Approval"),
+        }
+
+        // 3. Deny
+        let deny_args = vec!["microvm", "approval", "deny", "appr_000001", "-r", "Dangerous action"];
+        let cli3 = Cli::try_parse_from(deny_args).unwrap();
+        match cli3.command {
+            Commands::Approval { command } => match command {
+                ApprovalCommands::Deny { id, reason, .. } => {
+                    assert_eq!(id, "appr_000001");
+                    assert_eq!(reason, Some("Dangerous action".to_string()));
+                }
+                _ => panic!("Expected ApprovalCommands::Deny"),
+            },
+            _ => panic!("Expected Commands::Approval"),
         }
     }
 

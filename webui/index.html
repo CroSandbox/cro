@@ -59,6 +59,11 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
           Pingora Egress
         </button>
+        <button class="nav-link" id="nav-approvals-btn" data-target="approvals-view">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7.5" r="4"/><polyline points="17 11 19 13 23 9"/></svg>
+          Agent Approvals (HITL)
+          <span class="badge-pending" id="badge-pending-count">1</span>
+        </button>
       </nav>
 
       <div class="header-actions">
@@ -412,6 +417,98 @@
         </div>
       </div>
     </section>
+ 
+    <!-- Agent Approvals (HITL) View (OneCLI Integration) -->
+    <section class="approvals-section glass-panel" id="approvals-view" style="display: none;">
+      <div class="approvals-header">
+        <div class="approvals-header-content">
+          <div class="hero-badge badge-indigo">
+            <span class="badge-icon">🔒</span>
+            <span>OneCLI Security Architecture &bull; Human-in-the-Loop Gateway</span>
+          </div>
+          <h2 class="section-title">AI Agent <span class="gradient-text">Human-in-the-Loop Approvals</span></h2>
+          <p class="section-desc">
+            Autonomous AI Agents run completely uncredentialed inside hardware-isolated microVMs.
+            Outbound mutating requests (POST, PUT, DELETE, git push, payments) are held suspended on the wire by Pingora L7 until approved by a human reviewer.
+          </p>
+        </div>
+        <div class="approvals-quick-actions">
+          <button class="btn btn-secondary" id="btn-simulate-mutation">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            Trigger Sample Interception
+          </button>
+        </div>
+      </div>
+
+      <!-- Security Perimeter Telemetry Status -->
+      <div class="gate-status-grid">
+        <div class="gate-status-card">
+          <div class="gate-status-icon emerald">✓</div>
+          <div class="gate-status-info">
+            <div class="gate-status-name">Dynamic Header Injection</div>
+            <div class="gate-status-val">Active (Anthropic, OpenAI, GitHub)</div>
+          </div>
+        </div>
+        <div class="gate-status-card">
+          <div class="gate-status-icon cyan">⚡</div>
+          <div class="gate-status-info">
+            <div class="gate-status-name">Vault Resolvers</div>
+            <div class="gate-status-val">1Password (op://) &amp; Bitwarden (bw://)</div>
+          </div>
+        </div>
+        <div class="gate-status-card">
+          <div class="gate-status-icon violet">🛡️</div>
+          <div class="gate-status-info">
+            <div class="gate-status-name">Pingora Interception</div>
+            <div class="gate-status-val">Connection Hold &amp; Async Resume</div>
+          </div>
+        </div>
+        <div class="gate-status-card">
+          <div class="gate-status-icon amber">⏳</div>
+          <div class="gate-status-info">
+            <div class="gate-status-name">Pending Approvals</div>
+            <div class="gate-status-val" id="stat-pending-count">1 Request Held</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Active Approvals Container -->
+      <div class="approval-cards-container">
+        <div class="container-title-bar">
+          <h3>Suspended Outbound Requests Awaiting Decision</h3>
+          <span class="refresh-indicator" id="refresh-indicator">● Realtime Sync</span>
+        </div>
+
+        <div class="approval-cards-list" id="approval-cards-list">
+          <!-- Populated dynamically by app.js -->
+        </div>
+      </div>
+
+      <!-- Approval History Log -->
+      <div class="approval-history-panel">
+        <div class="container-title-bar">
+          <h3>Recent Decision Audit Log</h3>
+        </div>
+        <div class="history-table-wrapper">
+          <table class="history-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Time</th>
+                <th>Agent / MicroVM</th>
+                <th>Method</th>
+                <th>Destination</th>
+                <th>Summary</th>
+                <th>Verdict</th>
+              </tr>
+            </thead>
+            <tbody id="approval-history-tbody">
+              <!-- Populated dynamically by app.js -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
 
     <!-- CLI Syntax Modal / Drawer -->
     <div class="cli-drawer-overlay" id="cli-drawer">
@@ -431,19 +528,27 @@
             <button class="btn-copy-code" id="btn-copy-cli-command">Copy Command</button>
           </div>
           <pre class="cli-command-code" id="cli-command-code">
-# 1. Run hardware-isolated document extraction in ephemeral microVM:
-microvm run \
+# 1. Run zero-trust agent sandbox with wire secret injection and HITL approval:
+cro sandbox \
+    --hitl \
+    --secret "ANTHROPIC_API_KEY=op://ai-vault/anthropic-key" \
+    --secret "GITHUB_TOKEN=bw://dev-tokens/github-pat" \
+    --allow-host api.anthropic.com:443 \
+    --allow-host api.github.com:443 \
+    -- agent-runner --task "Analyze codebase and publish release"
+
+# 2. Review and unblock suspended mutating requests from another shell:
+cro approval list
+cro approval approve appr-89a1c
+# or deny:
+cro approval deny appr-89a1c --reason "Unsanitized deletion detected"
+
+# 3. Hardware-isolated document detonation with ephemeral CoW:
+cro run \
     --workspace-cow ./inbox:/docs \
     --allow-host api.openai.com:443 \
     --max-tokens 5000 \
-    --gpu \
     alpine:latest -- sh -c "pdftotext /docs/Invoice_Audit_2026.pdf /docs/extracted.txt"
-
-# 2. Launch Cloudflare Pingora L7 reverse proxy gateway:
-microvm network pingora \
-    --listen 127.0.0.1:8080 \
-    --egress \
-    --allow-host api.openai.com:443
           </pre>
         </div>
       </div>

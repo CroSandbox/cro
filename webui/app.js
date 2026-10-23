@@ -667,14 +667,26 @@ Decompiled PDF content 100% matches visible rendering.`,
   const navScanner = document.getElementById('nav-scanner-btn');
   const navTelemetry = document.getElementById('nav-telemetry-btn');
   const navPingora = document.getElementById('nav-pingora-btn');
+  const navApprovals = document.getElementById('nav-approvals-btn');
+  const approvalsView = document.getElementById('approvals-view');
+  const scannerView = document.getElementById('scanner-view');
+  const badgePendingCount = document.getElementById('badge-pending-count');
+  const statPendingCount = document.getElementById('stat-pending-count');
+  const approvalCardsList = document.getElementById('approval-cards-list');
+  const approvalHistoryTbody = document.getElementById('approval-history-tbody');
+  const btnSimulateMutation = document.getElementById('btn-simulate-mutation');
 
   navScanner.addEventListener('click', () => {
     setActiveNav(navScanner);
-    document.getElementById('scanner-view').scrollIntoView({ behavior: 'smooth' });
+    approvalsView.style.display = 'none';
+    scannerView.style.display = 'block';
+    scannerView.scrollIntoView({ behavior: 'smooth' });
   });
 
   navTelemetry.addEventListener('click', () => {
     setActiveNav(navTelemetry);
+    approvalsView.style.display = 'none';
+    scannerView.style.display = 'block';
     if (detonationView.style.display !== 'block') {
       runDetonation('indirect-injection-pdf');
     }
@@ -688,10 +700,257 @@ Decompiled PDF content 100% matches visible rendering.`,
     cliDrawer.classList.add('open');
   });
 
+  navApprovals.addEventListener('click', () => {
+    setActiveNav(navApprovals);
+    scannerView.style.display = 'none';
+    detonationView.style.display = 'none';
+    approvalsView.style.display = 'block';
+    renderApprovals();
+    approvalsView.scrollIntoView({ behavior: 'smooth' });
+  });
+
   function setActiveNav(btn) {
-    [navScanner, navTelemetry, navPingora].forEach(b => b.classList.remove('active'));
+    [navScanner, navTelemetry, navPingora, navApprovals].forEach(b => {
+      if (b) b.classList.remove('active');
+    });
     btn.classList.add('active');
   }
+
+  // ============================================================================
+  // Agent Approvals & HITL Gateway System (OneCLI Integration)
+  // ============================================================================
+
+  let pendingApprovals = [
+    {
+      id: 'appr-' + Math.random().toString(36).substring(2, 7),
+      time: '12s ago',
+      microvm: 'cro-agent-vm3 (pid 3841)',
+      method: 'POST',
+      host: 'api.github.com',
+      path: '/repos/enterprise-ai/core-engine/releases',
+      summary: 'Publish Production Release v2.4.0 with compiled microvm binaries',
+      injectedKey: 'Authorization: Bearer op://prod-vault/github-token (Resolved on wire)',
+      bodyPreview: '{"tag_name":"v2.4.0","target_commitish":"main","name":"v2.4.0 Stable","draft":false,"prerelease":false}'
+    }
+  ];
+
+  let approvalHistory = [
+    {
+      id: 'appr-f921a',
+      time: '2m ago',
+      microvm: 'cro-agent-vm1 (pid 2190)',
+      method: 'POST',
+      host: 'api.anthropic.com',
+      path: '/v1/messages',
+      summary: 'Claude 3.7 Sonnet Inference (4,820 prompt tokens)',
+      verdict: 'APPROVED'
+    },
+    {
+      id: 'appr-c148e',
+      time: '8m ago',
+      microvm: 'cro-agent-vm2 (pid 2940)',
+      method: 'DELETE',
+      host: 's3.us-west-2.amazonaws.com',
+      path: '/backup-buckets/db_dump_latest.tar.gz',
+      summary: 'Delete Production Database Backup archive',
+      verdict: 'DENIED'
+    }
+  ];
+
+  const SIMULATION_POOL = [
+    {
+      method: 'DELETE',
+      host: 'api.stripe.com',
+      path: '/v1/subscriptions/sub_9941a8',
+      summary: 'Cancel Enterprise Tier Customer Subscription (Account: acct_8892)',
+      injectedKey: 'Authorization: Bearer op://finance/stripe-secret-key (Resolved on wire)',
+      bodyPreview: '{"cancel_at_period_end": false, "prorate": true}'
+    },
+    {
+      method: 'POST',
+      host: 'api.openai.com',
+      path: '/v1/chat/completions',
+      summary: 'High-token Autonomous Agent reasoning loop with tools: [bash_exec, write_file]',
+      injectedKey: 'Authorization: Bearer op://ai-vault/openai-key (Resolved on wire)',
+      bodyPreview: '{"model": "gpt-4o", "temperature": 0.2, "messages": [{"role": "system", "content": "Autonomous bash execution enabled..."}]}'
+    },
+    {
+      method: 'PUT',
+      host: 'api.github.com',
+      path: '/repos/enterprise-ai/core-engine/collaborators/dev-bot',
+      summary: 'Grant Admin / Write collaborator access to external agent service',
+      injectedKey: 'Authorization: Bearer bw://tokens/github-pat (Bitwarden vault resolved)',
+      bodyPreview: '{"permission": "admin"}'
+    },
+    {
+      method: 'DELETE',
+      host: 'api.cloudflare.com',
+      path: '/client/v4/zones/zone-8192a/dns_records/dns-194',
+      summary: 'Delete Public Production DNS Record: api.company.io -> 192.0.2.1',
+      injectedKey: 'Authorization: Bearer op://network/cloudflare-api-token (Resolved on wire)',
+      bodyPreview: '{}'
+    }
+  ];
+
+  let simIndex = 0;
+
+  function updateBadgeCounts() {
+    const count = pendingApprovals.length;
+    if (badgePendingCount) {
+      badgePendingCount.textContent = count;
+      badgePendingCount.style.display = count > 0 ? 'inline-flex' : 'none';
+    }
+    if (statPendingCount) {
+      statPendingCount.textContent = count === 1 ? '1 Request Held' : count + ' Requests Held';
+    }
+  }
+
+  function renderApprovals() {
+    updateBadgeCounts();
+
+    if (!approvalCardsList) return;
+
+    if (pendingApprovals.length === 0) {
+      approvalCardsList.innerHTML = `
+        <div class="approval-empty-state">
+          <div class="approval-empty-icon">🛡️</div>
+          <div class="approval-empty-title">All Outbound Requests Resolved</div>
+          <div class="approval-empty-desc">
+            No agent requests are currently suspended on the wire. Pingora L7 egress proxy is standing by with zero-trust perimeter security active.
+          </div>
+        </div>
+      `;
+    } else {
+      approvalCardsList.innerHTML = pendingApprovals.map(appr => {
+        const methodClass = 'method-' + appr.method.toLowerCase();
+        return `
+          <div class="approval-card" id="card-${appr.id}">
+            <div class="approval-card-header">
+              <div class="approval-meta-left">
+                <span class="method-badge ${methodClass}">${appr.method}</span>
+                <span class="approval-endpoint">https://${appr.host}${appr.path}</span>
+                <span class="approval-vm-badge">${appr.microvm}</span>
+              </div>
+              <div class="approval-timer">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                <span>${appr.time}</span>
+              </div>
+            </div>
+
+            <div class="approval-summary-box">
+              <div class="approval-summary-title">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="7.86 2 16.14 2 22 7.86 22 16.14 16.14 22 7.86 22 2 16.14 2 7.86 7.86 2"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                <span>Interception Summary: ${appr.summary}</span>
+              </div>
+              <div class="approval-summary-desc">
+                Payload: <code style="font-family: var(--font-mono); font-size: 0.8rem; background: rgba(0,0,0,0.4); padding: 2px 6px; border-radius: 4px;">${escapeHtml(appr.bodyPreview)}</code>
+              </div>
+              <div class="approval-injected-secrets">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                <span>Header Injection: ${escapeHtml(appr.injectedKey)}</span>
+              </div>
+            </div>
+
+            <div class="approval-actions">
+              <button class="btn-deny" onclick="window.denyApproval('${appr.id}')">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                Deny Request (HTTP 403)
+              </button>
+              <button class="btn-approve" onclick="window.approveApproval('${appr.id}')">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                Approve &amp; Resume Wire
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    renderHistory();
+  }
+
+  function renderHistory() {
+    if (!approvalHistoryTbody) return;
+    approvalHistoryTbody.innerHTML = approvalHistory.map(item => `
+      <tr>
+        <td><code>${item.id}</code></td>
+        <td>${item.time}</td>
+        <td><code>${item.microvm}</code></td>
+        <td><span class="method-badge method-${item.method.toLowerCase()}">${item.method}</span></td>
+        <td><code>${item.host}${item.path}</code></td>
+        <td>${item.summary}</td>
+        <td>
+          <span class="verdict-tag ${item.verdict.toLowerCase()}">
+            ${item.verdict === 'APPROVED' ? '✓ APPROVED' : '✗ DENIED'}
+          </span>
+        </td>
+      </tr>
+    `).join('');
+  }
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  window.approveApproval = function(id) {
+    const idx = pendingApprovals.findIndex(a => a.id === id);
+    if (idx !== -1) {
+      const appr = pendingApprovals.splice(idx, 1)[0];
+      approvalHistory.unshift({
+        id: appr.id,
+        time: 'Just now',
+        microvm: appr.microvm,
+        method: appr.method,
+        host: appr.host,
+        path: appr.path,
+        summary: appr.summary,
+        verdict: 'APPROVED'
+      });
+      renderApprovals();
+    }
+  };
+
+  window.denyApproval = function(id) {
+    const idx = pendingApprovals.findIndex(a => a.id === id);
+    if (idx !== -1) {
+      const appr = pendingApprovals.splice(idx, 1)[0];
+      approvalHistory.unshift({
+        id: appr.id,
+        time: 'Just now',
+        microvm: appr.microvm,
+        method: appr.method,
+        host: appr.host,
+        path: appr.path,
+        summary: appr.summary,
+        verdict: 'DENIED'
+      });
+      renderApprovals();
+    }
+  };
+
+  if (btnSimulateMutation) {
+    btnSimulateMutation.addEventListener('click', () => {
+      const template = SIMULATION_POOL[simIndex % SIMULATION_POOL.length];
+      simIndex++;
+      const newAppr = {
+        id: 'appr-' + Math.random().toString(36).substring(2, 7),
+        time: 'Just now',
+        microvm: 'cro-agent-vm' + (Math.floor(Math.random() * 4) + 1) + ' (pid ' + (3000 + Math.floor(Math.random() * 2000)) + ')',
+        method: template.method,
+        host: template.host,
+        path: template.path,
+        summary: template.summary,
+        injectedKey: template.injectedKey,
+        bodyPreview: template.bodyPreview
+      };
+      pendingApprovals.unshift(newAppr);
+      renderApprovals();
+    });
+  }
+
+  // Initialize count badge on load
+  updateBadgeCounts();
 
   // Keyboard escape closes modal
   document.addEventListener('keydown', (e) => {

@@ -5,11 +5,16 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 pub mod egress;
+pub mod gateway;
 pub mod gvproxy;
 pub mod pingora;
 
 pub use crate::types::PortForward;
 pub use egress::{EgressPolicy, EgressProxyServer, LlmTokenBudget, SecretSubstitution};
+pub use gateway::{
+    ApprovalPolicy, ApprovalStatus, ApprovalStore, ApprovalTrigger, CredentialInjectionRule,
+    HeaderInjectionEngine, InjectionAction, PendingApproval, RequestSummarizer, VaultResolver,
+};
 pub use gvproxy::{GvproxyConfig, GvproxyInstance};
 pub use pingora::{
     create_pingora_egress_service, create_pingora_gateway_service, run_pingora_egress_server,

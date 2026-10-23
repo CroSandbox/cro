@@ -5,6 +5,7 @@
 //! and Zero-Trust Egress filtering in `libkrun-sdk`.
 
 use crate::net::egress::{parse_host_port, EgressPolicy, SecretSubstitution};
+use crate::net::gateway::{ApprovalPolicy, ApprovalStore, HeaderInjectionEngine, InjectionAction};
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -36,13 +37,19 @@ pub struct PingoraRequestContext {
 /// 1. Default-deny domain whitelisting with wildcard (`*.github.com`) and CIDR support.
 /// 2. Strict cloud metadata defense (blocks SSRF to `169.254.169.254`, `100.100.100.200`, `fd00:ec2::254`).
 /// 3. In-flight secret substitution in headers, URI queries, and request body chunks.
-/// 4. Upstream connection pooling with HTTP/1.1 and HTTP/2 multiplexing.
-/// 5. Streaming LLM token ceiling budget enforcement.
+/// 4. Dynamic header & credential injection (Anthropic, OpenAI, Gemini, GitHub).
+/// 5. Human-in-the-Loop (HITL) approval pause/resume for mutating or dangerous requests.
+/// 6. Upstream connection pooling with HTTP/1.1 and HTTP/2 multiplexing.
+/// 7. Streaming LLM token ceiling budget enforcement.
 pub struct PingoraEgressProxy {
     pub policy: Arc<EgressPolicy>,
     pub secret_substitution: Arc<SecretSubstitution>,
     pub token_meter: Option<Arc<AtomicU64>>,
     pub token_ceiling: Option<u64>,
+    pub injection_engine: Arc<HeaderInjectionEngine>,
+    pub approval_policy: Arc<ApprovalPolicy>,
+    pub approval_store: Option<Arc<ApprovalStore>>,
+    pub vm_id: String,
 }
 
 impl PingoraEgressProxy {
@@ -51,12 +58,36 @@ impl PingoraEgressProxy {
         secrets: &[(String, String)],
         max_tokens: Option<u64>,
     ) -> Self {
+        let mut injection = HeaderInjectionEngine::new();
+        injection.auto_configure_from_secrets(secrets);
+
         Self {
             policy: Arc::new(policy),
             secret_substitution: Arc::new(SecretSubstitution::new(secrets)),
             token_meter: max_tokens.map(|_| Arc::new(AtomicU64::new(0))),
             token_ceiling: max_tokens,
+            injection_engine: Arc::new(injection),
+            approval_policy: Arc::new(ApprovalPolicy::default()),
+            approval_store: None,
+            vm_id: "cro-microvm".to_string(),
         }
+    }
+
+    pub fn with_approvals(
+        mut self,
+        policy: ApprovalPolicy,
+        store: Arc<ApprovalStore>,
+        vm_id: impl Into<String>,
+    ) -> Self {
+        self.approval_policy = Arc::new(policy);
+        self.approval_store = Some(store);
+        self.vm_id = vm_id.into();
+        self
+    }
+
+    pub fn with_injection_engine(mut self, engine: HeaderInjectionEngine) -> Self {
+        self.injection_engine = Arc::new(engine);
+        self
     }
 
     pub fn tokens_consumed(&self) -> u64 {
@@ -129,6 +160,76 @@ impl ProxyHttp for PingoraEgressProxy {
             return Ok(true);
         }
 
+        // 2. Human-in-the-Loop (HITL) approval pause/resume
+        let method = req_header.method.as_str();
+        let path = req_header.uri.path();
+
+        if self.approval_policy.requires_approval(method, &target_host, path) {
+            if let Some(ref store) = self.approval_store {
+                let client_addr = session
+                    .client_addr()
+                    .map(|a| a.to_string())
+                    .unwrap_or_else(|| "guest-microvm".to_string());
+
+                let (approval_id, rx) = store
+                    .submit(
+                        &self.vm_id,
+                        client_addr,
+                        method,
+                        &target_host,
+                        target_port,
+                        path,
+                        None,
+                    )
+                    .await;
+
+                tracing::info!(
+                    "[PingoraEgress] Request held for Human-in-the-Loop review (ID: {}): {} https://{}:{}{}",
+                    approval_id,
+                    method,
+                    target_host,
+                    target_port,
+                    path
+                );
+
+                let timeout_dur = Duration::from_secs(self.approval_policy.default_timeout_secs);
+                let approved = match tokio::time::timeout(timeout_dur, rx).await {
+                    Ok(Ok(decision)) => decision,
+                    Ok(Err(_)) => false,
+                    Err(_) => {
+                        store.mark_timeout(&approval_id).await;
+                        false
+                    }
+                };
+
+                if !approved {
+                    ctx.blocked = true;
+                    tracing::warn!(
+                        "[PingoraEgress] Request denied by Human-in-the-Loop review (ID: {})",
+                        approval_id
+                    );
+
+                    let mut resp = ResponseHeader::build(403, None)?;
+                    resp.append_header("Content-Type", "application/json")?;
+                    resp.append_header("X-Proxy-Engine", "Cloudflare-Pingora-CroGateway")?;
+                    let body = format!(
+                        r#"{{"error":"HumanApprovalDenied","id":"{}","message":"Request '{} https://{}{}' denied or timed out by human reviewer"}}"#,
+                        approval_id, method, target_host, path
+                    );
+                    session.write_response_header(Box::new(resp), false).await?;
+                    session
+                        .write_response_body(Some(Bytes::from(body)), true)
+                        .await?;
+                    return Ok(true);
+                }
+
+                tracing::info!(
+                    "[PingoraEgress] Request approved by human reviewer (ID: {})",
+                    approval_id
+                );
+            }
+        }
+
         Ok(false)
     }
 
@@ -163,8 +264,33 @@ impl ProxyHttp for PingoraEgressProxy {
         &self,
         _session: &mut Session,
         upstream_request: &mut RequestHeader,
-        _ctx: &mut Self::CTX,
+        ctx: &mut Self::CTX,
     ) -> pingora::Result<()> {
+        // 0. Dynamic In-Flight Header & Credential Injection (OneCLI model)
+        let path = upstream_request.uri.path().to_string();
+        let injections = self.injection_engine.find_injections(&ctx.target_host, &path);
+        for action in injections {
+            match action {
+                InjectionAction::SetHeader { name, value } => {
+                    let _ = upstream_request.insert_header(name, value);
+                }
+                InjectionAction::SetBearerToken(token) => {
+                    let _ = upstream_request.insert_header("Authorization", format!("Bearer {}", token));
+                }
+                InjectionAction::SetApiKey { header_name, key } => {
+                    let _ = upstream_request.insert_header(header_name, key);
+                }
+                InjectionAction::SetQueryParam { name, value } => {
+                    let uri_str = upstream_request.uri.to_string();
+                    let separator = if uri_str.contains('?') { '&' } else { '?' };
+                    let new_uri_str = format!("{uri_str}{separator}{name}={value}");
+                    if let Ok(new_uri) = new_uri_str.parse::<http::Uri>() {
+                        upstream_request.set_uri(new_uri);
+                    }
+                }
+            }
+        }
+
         // 1. Substitute in URI (path and query parameters, e.g. ?key=krun-secret:API_KEY)
         let uri_str = upstream_request.uri.to_string();
         if uri_str.contains("krun-secret:") || uri_str.contains("krun-secret%3A") || uri_str.contains("krun-secret%3a") {

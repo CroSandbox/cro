@@ -375,7 +375,57 @@ cro sandbox claude \
 - **In-Flight Secret Substitution**: Injected API keys are replaced by the host proxy in-flight (`krun-secret:ANTHROPIC_API_KEY`); the guest VM never holds the raw credential in RAM.
 - **LLM Token Ceilings**: Enforce hard token budgets with `--max-tokens 50000` to prevent runaway API spend.
 
-### 2. Isolated Git Cherry-Pick & Bi-Directional Commit Syncing
+### 2. Human-in-the-Loop (HITL) Gateway & Dynamic Vault Injection (OneCLI Architecture)
+Drawing directly from zero-trust agent security paradigms (such as [OneCLI](https://github.com/onecli/onecli)), `cro` features an advanced **Human-in-the-Loop (HITL) Gateway** integrated directly into the Cloudflare Pingora L7 proxy:
+
+```bash
+# Launch an agent sandbox with HITL approval and external vault secret resolution:
+cro sandbox \
+    --hitl \
+    --secret "ANTHROPIC_API_KEY=op://ai-vault/anthropic-key" \
+    --secret "GITHUB_TOKEN=bw://tokens/github-pat" \
+    --allow-host api.anthropic.com:443 \
+    --allow-host api.github.com:443 \
+    -- python agent.py
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Dev as Human Reviewer
+    participant Agent as Autonomous Agent (MicroVM)
+    participant Pingora as Pingora L7 Egress Proxy
+    participant Store as Approval IPC Queue
+    participant Upstream as External API (Anthropic / GitHub)
+
+    Agent->>Pingora: Outbound POST /repos/.../releases (Uncredentialed)
+    Note over Pingora: Match HITL Policy: POST is Mutating
+    Pingora->>Store: Pause connection & register pending approval
+    Store-->>Dev: Alert: appr-89a1c pending decision
+    Dev->>Store: cro approval approve appr-89a1c
+    Store->>Pingora: Resume connection
+    Pingora->>Pingora: In-flight header injection (resolve op://vault)
+    Pingora->>Upstream: Authorized POST with Bearer token
+    Upstream-->>Pingora: 201 Created
+    Pingora-->>Agent: 201 Created (Seamless to guest)
+```
+
+- **Zero Credentials in MicroVM**: API keys and tokens are **never** passed into container environment variables, filesystem configs, or RAM. The guest agent issues requests uncredentialed or with placeholder headers; Pingora resolves the real secret dynamically from 1Password (`op://`), Bitwarden (`bw://`), environment variables (`env:`), or secure files (`file:`) and injects it on the wire.
+- **Mutating Request Hold**: Any outbound request attempting state mutations (`POST`, `PUT`, `DELETE`, `PATCH`, destructive endpoints) is suspended in-flight at the L7 proxy.
+- **Cross-Process IPC Approval Queue**: Review and unblock paused connections from another terminal tab or automation script:
+  ```bash
+  # View all outbound requests currently held on the wire:
+  cro approval list
+
+  # Approve and resume the request:
+  cro approval approve appr-89a1c
+
+  # Or deny with HTTP 403 Forbidden sent to the agent:
+  cro approval deny appr-89a1c --reason "Unsanitized release deletion attempt"
+  ```
+- **Realtime WebUI Approvals Dashboard**: Visual cards with payload previews, automated threat summarization, and one-click approve/deny controls in the `/unstructured` WebUI.
+
+### 3. Isolated Git Cherry-Pick & Bi-Directional Commit Syncing
 Test feature branches or pull requests inside a safe microVM without altering your local working directory:
 
 ```bash
@@ -972,7 +1022,8 @@ EOF
 | **`compose logs`** | `cro compose logs -f` | Stream unified, aggregated logs across all microVM services |
 | **`compose down`** | `cro compose down -f <compose.yaml>` | Gracefully stop and clean up all compose microVM instances |
 | **`apply`** | `cro apply -f <manifest.yaml> [-d]` | Apply any YAML manifest (Compose, Kubernetes MicroVm CRD, or Pod) |
-| **`sandbox`** | `cro sandbox <agent> -w <dir> [--cherry-pick <sha>]` | Launch an AI coding agent (Claude, Gemini, Dev) with CoW workspace & secret masking |
+| **`sandbox`** | `cro sandbox [OPTIONS] [--hitl] [--secret <K=V>]...` | Launch an AI coding agent with CoW workspace, HITL wire-hold, and vault secrets |
+| **`approval`**| `cro approval <list\|approve\|deny> [ID]` | Inspect, approve, or deny in-flight mutating agent requests held at Pingora gateway |
 | **`cherry-pick`**| `cro cherry-pick <vm-id> -w <host-dir>` | Cherry-pick commits made in an isolated sandbox back to host git repository |
 | **`exec`** | `cro exec [OPTIONS] <ID> <CMD>...` | Execute interactive or batch commands inside a live microVM via vsock |
 | **`ps`** | `cro ps [-a]` | List running, paused, and recent microVM instances |
