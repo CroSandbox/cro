@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Payload sent from the host caller to execute a process inside the microVM.
+#[must_use = "ExecRequest must be submitted to exec_in_microvm or StateManager::exec"]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecRequest {
     /// Command and arguments to execute (e.g. `["/bin/sh", "-c", "uname -a"]`).

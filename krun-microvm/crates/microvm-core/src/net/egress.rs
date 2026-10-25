@@ -106,28 +106,7 @@ impl EgressPolicy {
     }
 
     pub fn host_matches(pattern: &str, host: &str) -> bool {
-        let pattern = pattern
-            .trim()
-            .trim_matches(|c| c == '[' || c == ']')
-            .to_lowercase();
-        let host = host
-            .trim()
-            .trim_matches(|c| c == '[' || c == ']')
-            .to_lowercase();
-
-        if pattern == "*" || pattern == host {
-            return true;
-        }
-
-        if let Some(suffix) = pattern.strip_prefix("*.") {
-            if host.ends_with(suffix)
-                && host.len() > suffix.len()
-                && host.as_bytes()[host.len() - suffix.len() - 1] == b'.'
-            {
-                return true;
-            }
-        }
-        false
+        crate::net::host_matcher::host_pattern_matches_strict_subdomain(pattern, host)
     }
 }
 
@@ -187,7 +166,8 @@ pub fn is_cloud_metadata(target_host: &str) -> bool {
     // Direct IPv4 link-local (169.254.0.0/16) prefix or specific IP
     if host_lower == "169.254.169.254"
         || host_lower.starts_with("169.254.")
-        || host_lower == "100.100.100.200" // Alibaba Cloud IMDS
+        || host_lower == "100.100.100.200"
+    // Alibaba Cloud IMDS
     {
         return true;
     }
@@ -394,14 +374,26 @@ impl LlmTokenBudget {
                 self.record_tokens(total);
                 return;
             }
-            let input = usage.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-            let output = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+            let input = usage
+                .get("input_tokens")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
+            let output = usage
+                .get("output_tokens")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
             if input + output > 0 {
                 self.record_tokens(input + output);
                 return;
             }
-            let prompt = usage.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-            let comp = usage.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+            let prompt = usage
+                .get("prompt_tokens")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
+            let comp = usage
+                .get("completion_tokens")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
             if prompt + comp > 0 {
                 self.record_tokens(prompt + comp);
                 return;
@@ -414,8 +406,14 @@ impl LlmTokenBudget {
                 self.record_tokens(total);
                 return;
             }
-            let prompt = usage.get("promptTokenCount").and_then(|t| t.as_u64()).unwrap_or(0);
-            let candidates = usage.get("candidatesTokenCount").and_then(|t| t.as_u64()).unwrap_or(0);
+            let prompt = usage
+                .get("promptTokenCount")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
+            let candidates = usage
+                .get("candidatesTokenCount")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
             if prompt + candidates > 0 {
                 self.record_tokens(prompt + candidates);
                 return;
@@ -423,7 +421,10 @@ impl LlmTokenBudget {
         }
 
         // 3. Ollama format: "prompt_eval_count": N, "eval_count": M
-        let prompt_eval = val.get("prompt_eval_count").and_then(|t| t.as_u64()).unwrap_or(0);
+        let prompt_eval = val
+            .get("prompt_eval_count")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0);
         let eval = val.get("eval_count").and_then(|t| t.as_u64()).unwrap_or(0);
         if prompt_eval + eval > 0 {
             self.record_tokens(prompt_eval + eval);
@@ -433,8 +434,14 @@ impl LlmTokenBudget {
         // 4. Cohere format: "meta": { "tokens": { "input_tokens": A, "output_tokens": B } }
         if let Some(meta) = val.get("meta") {
             if let Some(tokens) = meta.get("tokens") {
-                let input = tokens.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                let output = tokens.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                let input = tokens
+                    .get("input_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                let output = tokens
+                    .get("output_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
                 if input + output > 0 {
                     self.record_tokens(input + output);
                     return;
@@ -672,7 +679,10 @@ pub fn sanitize_and_rewrite_request(
         updated_lines.push("Connection: close".to_string());
     }
     if let Some(new_len) = new_body_len {
-        if !updated_lines.iter().any(|l| l.to_ascii_lowercase().starts_with("content-length:")) {
+        if !updated_lines
+            .iter()
+            .any(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+        {
             updated_lines.push(format!("Content-Length: {}", new_len));
         }
     }
@@ -755,7 +765,8 @@ async fn handle_client(
         };
 
         if addrs.is_empty() {
-            let resp = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 20\r\n\r\nNo IP address found\r\n";
+            let resp =
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 20\r\n\r\nNo IP address found\r\n";
             let _ = client.write_all(resp).await;
             bail!("No IP addresses found for {}:{}", host, port);
         }
@@ -765,7 +776,9 @@ async fn handle_client(
             let ip = addr.ip();
             if is_cloud_metadata_ip(&ip) && !policy.is_ip_explicitly_allowed(ip, port) {
                 blocked_requests.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!("DNS rebinding attempt to metadata IP {ip} BLOCKED for target {host}:{port}");
+                tracing::warn!(
+                    "DNS rebinding attempt to metadata IP {ip} BLOCKED for target {host}:{port}"
+                );
                 let resp = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 43\r\n\r\nCloud metadata exfiltration defense triggered\r\n";
                 client.write_all(resp).await?;
                 return Ok(());
@@ -821,7 +834,8 @@ async fn handle_client(
         };
 
         if addrs.is_empty() {
-            let resp = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 20\r\n\r\nNo IP address found\r\n";
+            let resp =
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 20\r\n\r\nNo IP address found\r\n";
             let _ = client.write_all(resp).await;
             bail!("No IP addresses found for {}:{}", host, port);
         }
@@ -830,7 +844,9 @@ async fn handle_client(
             let ip = addr.ip();
             if is_cloud_metadata_ip(&ip) && !policy.is_ip_explicitly_allowed(ip, port) {
                 blocked_requests.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!("DNS rebinding attempt to metadata IP {ip} BLOCKED for target {host}:{port}");
+                tracing::warn!(
+                    "DNS rebinding attempt to metadata IP {ip} BLOCKED for target {host}:{port}"
+                );
                 let resp = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 43\r\n\r\nCloud metadata exfiltration defense triggered\r\n";
                 client.write_all(resp).await?;
                 return Ok(());
@@ -869,7 +885,11 @@ async fn handle_client(
             &path,
             &host,
             port,
-            if content_len.is_some() { Some(substituted_body.len()) } else { None },
+            if content_len.is_some() {
+                Some(substituted_body.len())
+            } else {
+                None
+            },
         );
 
         let mut final_req = rewritten_headers;
@@ -1085,7 +1105,8 @@ mod tests {
     fn test_multi_provider_llm_token_budget() {
         // Test Anthropic format: input_tokens + output_tokens
         let anthropic_budget = LlmTokenBudget::new(None);
-        let anthropic_chunk = br#"{"type":"message","usage":{"input_tokens":40,"output_tokens":60}}"#;
+        let anthropic_chunk =
+            br#"{"type":"message","usage":{"input_tokens":40,"output_tokens":60}}"#;
         anthropic_budget.inspect_chunk(anthropic_chunk);
         assert_eq!(anthropic_budget.total_consumed(), 100);
 

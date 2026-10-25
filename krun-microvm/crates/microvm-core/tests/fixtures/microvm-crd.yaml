@@ -1,0 +1,10 @@
+apiVersion: krun.io/v1alpha1
+kind: MicroVm
+metadata:
+  name: isolated-worker
+spec:
+  image: alpine:latest
+  vcpus: 2
+  memory: 512M
+  cmd: ["/bin/sh", "-c", "echo ready"]
+  port: 9000

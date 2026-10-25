@@ -12,10 +12,12 @@ pub struct Preflight;
 
 impl Preflight {
     pub fn run_all(ports: &[u16], workdir: &Path) -> Vec<CheckResult> {
-        let mut results = Vec::new();
-        results.push(Self::check_virtualization());
-        results.push(Self::check_hypervisor_toolchain());
-        results.push(Self::check_workdir(workdir));
+        let mut results = vec![
+            Self::check_virtualization(),
+            Self::check_hypervisor_toolchain(),
+            Self::check_hypervisor_capabilities(),
+            Self::check_workdir(workdir),
+        ];
 
         for &port in ports {
             results.push(Self::check_port(port));
@@ -23,6 +25,44 @@ impl Preflight {
 
         results
     }
+
+
+    pub fn check_hypervisor_capabilities() -> CheckResult {
+        let max_vcpus = krun_sys::get_max_vcpus().unwrap_or(0);
+        let has_net = krun_sys::has_feature(krun_sys::features::KRUN_FEATURE_NET);
+        let has_blk = krun_sys::has_feature(krun_sys::features::KRUN_FEATURE_BLK);
+        let has_gpu = krun_sys::has_feature(krun_sys::features::KRUN_FEATURE_GPU);
+
+        let mut feats = Vec::new();
+        if has_net {
+            feats.push("net");
+        }
+        if has_blk {
+            feats.push("blk");
+        }
+        if has_gpu {
+            feats.push("gpu");
+        }
+
+        CheckResult {
+            name: "Hypervisor Capabilities".to_string(),
+            passed: max_vcpus > 0,
+            message: format!(
+                "Max vCPUs: {}, features: [{}]",
+                if max_vcpus > 0 {
+                    max_vcpus.to_string()
+                } else {
+                    "standard".to_string()
+                },
+                if feats.is_empty() {
+                    "standard".to_string()
+                } else {
+                    feats.join(", ")
+                }
+            ),
+        }
+    }
+
 
     pub fn check_hypervisor_toolchain() -> CheckResult {
         #[cfg(target_os = "macos")]

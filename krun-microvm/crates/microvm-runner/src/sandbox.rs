@@ -207,6 +207,8 @@ mod tests {
             dns_servers: vec![],
             hostname: None,
             supervisor_sock_path: None,
+            fs_overlays: vec![],
+            smbios_oem_strings: vec![],
         };
 
         assert!(apply_sandbox(&cfg).is_ok());
@@ -248,6 +250,8 @@ mod tests {
             dns_servers: vec![],
             hostname: None,
             supervisor_sock_path: None,
+            fs_overlays: vec![],
+            smbios_oem_strings: vec![],
         };
 
         assert!(apply_sandbox(&cfg).is_ok());

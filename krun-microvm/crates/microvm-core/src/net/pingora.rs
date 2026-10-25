@@ -164,7 +164,10 @@ impl ProxyHttp for PingoraEgressProxy {
         let method = req_header.method.as_str();
         let path = req_header.uri.path();
 
-        if self.approval_policy.requires_approval(method, &target_host, path) {
+        if self
+            .approval_policy
+            .requires_approval(method, &target_host, path)
+        {
             if let Some(ref store) = self.approval_store {
                 let client_addr = session
                     .client_addr()
@@ -268,14 +271,17 @@ impl ProxyHttp for PingoraEgressProxy {
     ) -> pingora::Result<()> {
         // 0. Dynamic In-Flight Header & Credential Injection (OneCLI model)
         let path = upstream_request.uri.path().to_string();
-        let injections = self.injection_engine.find_injections(&ctx.target_host, &path);
+        let injections = self
+            .injection_engine
+            .find_injections(&ctx.target_host, &path);
         for action in injections {
             match action {
                 InjectionAction::SetHeader { name, value } => {
                     let _ = upstream_request.insert_header(name, value);
                 }
                 InjectionAction::SetBearerToken(token) => {
-                    let _ = upstream_request.insert_header("Authorization", format!("Bearer {}", token));
+                    let _ = upstream_request
+                        .insert_header("Authorization", format!("Bearer {}", token));
                 }
                 InjectionAction::SetApiKey { header_name, key } => {
                     let _ = upstream_request.insert_header(header_name, key);
@@ -293,7 +299,10 @@ impl ProxyHttp for PingoraEgressProxy {
 
         // 1. Substitute in URI (path and query parameters, e.g. ?key=krun-secret:API_KEY)
         let uri_str = upstream_request.uri.to_string();
-        if uri_str.contains("krun-secret:") || uri_str.contains("krun-secret%3A") || uri_str.contains("krun-secret%3a") {
+        if uri_str.contains("krun-secret:")
+            || uri_str.contains("krun-secret%3A")
+            || uri_str.contains("krun-secret%3a")
+        {
             let substituted = self.secret_substitution.substitute(uri_str.as_bytes());
             if let Ok(new_uri_str) = std::str::from_utf8(&substituted) {
                 if let Ok(new_uri) = new_uri_str.parse::<http::Uri>() {
@@ -306,7 +315,10 @@ impl ProxyHttp for PingoraEgressProxy {
         let mut updates = Vec::new();
         for (name, value) in upstream_request.headers.iter() {
             if let Ok(val_str) = value.to_str() {
-                if val_str.contains("krun-secret:") || val_str.contains("krun-secret%3A") || val_str.contains("krun-secret%3a") {
+                if val_str.contains("krun-secret:")
+                    || val_str.contains("krun-secret%3A")
+                    || val_str.contains("krun-secret%3a")
+                {
                     let substituted = self.secret_substitution.substitute(val_str.as_bytes());
                     if let Ok(new_val) = std::str::from_utf8(&substituted) {
                         updates.push((name.clone(), new_val.to_string()));
@@ -378,7 +390,11 @@ pub struct MicroVmServiceBackend {
 }
 
 impl MicroVmServiceBackend {
-    pub fn new(service_name: impl Into<String>, target_addr: SocketAddr, path_prefix: impl Into<String>) -> Self {
+    pub fn new(
+        service_name: impl Into<String>,
+        target_addr: SocketAddr,
+        path_prefix: impl Into<String>,
+    ) -> Self {
         Self {
             service_name: service_name.into(),
             target_addr,
@@ -441,13 +457,12 @@ impl ProxyHttp for PingoraMicroVmGateway {
         let mut matched: Option<&MicroVmServiceBackend> = None;
         for (prefix, backend) in self.routes.iter() {
             let normalized_prefix = prefix.trim_end_matches('/');
-            if path == normalized_prefix
+            if (path == normalized_prefix
                 || path.starts_with(&format!("{}/", normalized_prefix))
-                || path.starts_with(prefix)
+                || path.starts_with(prefix))
+                && (matched.is_none() || prefix.len() > matched.unwrap().path_prefix.len())
             {
-                if matched.is_none() || prefix.len() > matched.unwrap().path_prefix.len() {
-                    matched = Some(backend);
-                }
+                matched = Some(backend);
             }
         }
 
@@ -478,17 +493,18 @@ impl ProxyHttp for PingoraMicroVmGateway {
         if let Some(backend) = ctx.as_ref() {
             if backend.strip_prefix {
                 let current_path = upstream_request.uri.path();
-                let new_path = if let Some(stripped) = current_path.strip_prefix(&backend.path_prefix) {
-                    if stripped.is_empty() {
-                        "/".to_string()
-                    } else if !stripped.starts_with('/') {
-                        format!("/{}", stripped)
+                let new_path =
+                    if let Some(stripped) = current_path.strip_prefix(&backend.path_prefix) {
+                        if stripped.is_empty() {
+                            "/".to_string()
+                        } else if !stripped.starts_with('/') {
+                            format!("/{}", stripped)
+                        } else {
+                            stripped.to_string()
+                        }
                     } else {
-                        stripped.to_string()
-                    }
-                } else {
-                    current_path.to_string()
-                };
+                        current_path.to_string()
+                    };
 
                 let query_str = upstream_request
                     .uri
@@ -605,12 +621,8 @@ mod tests {
         );
         routes.insert(
             "/web".to_string(),
-            MicroVmServiceBackend::new(
-                "web-service",
-                "127.0.0.1:3000".parse().unwrap(),
-                "/web",
-            )
-            .with_strip_prefix(true),
+            MicroVmServiceBackend::new("web-service", "127.0.0.1:3000".parse().unwrap(), "/web")
+                .with_strip_prefix(true),
         );
 
         let gateway = PingoraMicroVmGateway::new(routes);

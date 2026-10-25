@@ -117,6 +117,9 @@ fn add_search_paths(custom_dir: Option<&Path>) {
         let dir_str = dir.display().to_string();
         println!("cargo:rustc-link-search=native={dir_str}");
         println!("cargo:rustc-link-arg=-Wl,-rpath,{dir_str}");
+        if dir_str == "/opt/homebrew/lib" || dir_str == "/usr/local/lib" {
+            return;
+        }
     }
 
     #[cfg(target_os = "macos")]

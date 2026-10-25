@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)%20%7C%20Linux%20(KVM)-black.svg?style=for-the-badge&logo=apple)](https://github.com/CroSandbox/cro)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-134%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
+[![Tests](https://img.shields.io/badge/tests-184%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
 [![Cold Boot](https://img.shields.io/badge/boot_time-%3C100ms-success.svg?style=for-the-badge&logo=lightning)](https://github.com/CroSandbox/cro)
 [![Compose](https://img.shields.io/badge/orchestration-Docker%20Compose%20%7C%20K8s%20CRD-purple.svg?style=for-the-badge&logo=docker)](examples/krun-compose.yaml)
 
@@ -169,6 +169,9 @@ Official containerd v2 TTRPC shim (`containerd-shim-krun-v2`) and pure-Rust `kub
 | **VirtioFS DAX (LLM Weights)** | ❌ | ❌ | Complex block setup | **✅ Zero-Copy Shared Memory Window** |
 | **Zero-Trust Egress & Secret Proxy** | ❌ | ❌ (Manual iptables) | ❌ | **✅ Built-in Host Security Proxy** |
 | **Direct OCI Execution** | ✅ | ❌ (Requires raw rootfs) | ✅ | **✅ Direct OCI Image & Registry Pull** |
+| **Disk Image Formats** | Raw overlay | Raw only | QEMU formats | **✅ RAW, QCOW2 & VMDK (macOS Relaxed Sync)** |
+| **Orderly Shutdown Signaling** | SIGTERM to PID 1 | Serial / API | ACPI | **✅ ACPI / GPIO EventFd Interrupt** |
+| **In-Memory FS Overlays** | ❌ (Requires temp files) | ❌ | ❌ | **✅ Zero-Disk Virtual Injections (`one_shot`)** |
 
 ---
 

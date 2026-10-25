@@ -298,7 +298,10 @@ mod tests {
         assert_eq!(config.gateway_ip, "192.168.100.1");
         assert_eq!(config.mtu, 9000);
         assert!(config.debug);
-        assert_eq!(config.dns_search_domains, vec!["cluster.local", "krun.internal"]);
+        assert_eq!(
+            config.dns_search_domains,
+            vec!["cluster.local", "krun.internal"]
+        );
         assert_eq!(
             config.forwards.get("0.0.0.0:8080").unwrap(),
             "192.168.100.2:80"

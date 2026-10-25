@@ -1,0 +1,37 @@
+version: "3.8"
+name: integration-test-suite
+
+services:
+  db:
+    image: postgres:16-alpine
+    cpus: 1
+    memory: 256M
+    ports:
+      - "5432:5432"
+    env:
+      POSTGRES_DB: testdb
+      POSTGRES_PASSWORD: secretpassword
+    network_mode: gvproxy
+
+  redis:
+    image: redis:alpine
+    cpus: 1
+    memory: 128M
+    ports:
+      - "6379:6379"
+    network_mode: gvproxy
+
+  api:
+    image: node:20-alpine
+    cpus: 2
+    memory: 512M
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+      - redis
+    env:
+      NODE_ENV: test
+      DB_HOST: db
+      REDIS_HOST: redis
+    network_mode: gvproxy

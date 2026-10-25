@@ -2,7 +2,9 @@ use crate::config::KrunConfig;
 use crate::oci::{ImageReference, OciClient};
 use crate::preflight::Preflight;
 use crate::rootfs::clone_rootfs;
-use crate::types::{PortForward, RunnerConfig, VirtioFsMount, VsockPort};
+pub use crate::types::{
+    ArtifactMount, CowWorkspace, PortForward, RunnerConfig, VirtioFsMount, VsockPort,
+};
 use anyhow::{bail, Context, Result};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
@@ -16,19 +18,7 @@ use crate::tty::RawModeGuard;
 
 static INSTANCE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-#[derive(Debug, Clone)]
-pub struct ArtifactMount {
-    pub reference: String,
-    pub tag: String,
-    pub read_only: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct CowWorkspace {
-    pub host_path: PathBuf,
-    pub tag: String,
-}
-
+#[must_use = "MicroVmBuilder must be configured and executed by calling .run()"]
 pub struct MicroVmBuilder {
     image: String,
     vcpus: u8,
@@ -75,6 +65,8 @@ pub struct MicroVmBuilder {
     shm_size: Option<String>,
     approval_policy: Option<crate::net::ApprovalPolicy>,
     approval_store: Option<std::sync::Arc<crate::net::ApprovalStore>>,
+    fs_overlays: Vec<crate::types::FsOverlayEntry>,
+    smbios_oem_strings: Vec<String>,
 }
 
 impl MicroVmBuilder {
@@ -125,8 +117,11 @@ impl MicroVmBuilder {
             shm_size: None,
             approval_policy: None,
             approval_store: None,
+            fs_overlays: Vec::new(),
+            smbios_oem_strings: Vec::new(),
         }
     }
+
 
     /// Creates a MicroVmBuilder from an unpacked OCI runtime bundle directory (containing config.json and rootfs/).
     pub fn from_bundle(bundle_dir: impl AsRef<Path>) -> Result<Self> {
@@ -661,32 +656,67 @@ impl MicroVmBuilder {
         self
     }
 
-    /// Pulls the image (if not cached), creates a CoW rootfs snapshot, prepares .krun_config.json,
-    /// and spawns the microVM runner subprocess.
-    pub async fn run(self) -> Result<MicroVm> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let data_dir = self
-            .data_dir
-            .unwrap_or_else(|| PathBuf::from(home).join(".cache/krun-microvm"));
+    /// Attaches an existing DiskAttachment directly (with custom format or sync mode).
+    pub fn disk_attachment(mut self, attachment: crate::types::DiskAttachment) -> Self {
+        self.disks.push(attachment);
+        self
+    }
 
-        // 1. Run Preflight checks if enabled
-        if self.perform_preflight {
-            let host_ports: Vec<u16> = self.port_forwards.iter().map(|p| p.host).collect();
-            let reports = Preflight::run_all(&host_ports, &data_dir);
-            for r in &reports {
-                if !r.passed {
-                    bail!("Preflight check '{}' failed: {}", r.name, r.message);
-                }
+    /// Attaches an in-memory virtual filesystem overlay entry.
+    pub fn fs_overlay(mut self, entry: crate::types::FsOverlayEntry) -> Self {
+        self.fs_overlays.push(entry);
+        self
+    }
+
+    /// Injects an in-memory virtual overlay file into the guest filesystem.
+    pub fn fs_overlay_file(
+        mut self,
+        fs_tag: impl Into<String>,
+        path: impl Into<String>,
+        data: impl Into<Vec<u8>>,
+        mode: u32,
+        one_shot: bool,
+    ) -> Self {
+        self.fs_overlays.push(crate::types::FsOverlayEntry::new(
+            fs_tag, path, data, mode, one_shot,
+        ));
+        self
+    }
+
+    /// Injects an SMBIOS OEM string into guest BIOS/firmware tables.
+    pub fn smbios_oem_string(mut self, s: impl Into<String>) -> Self {
+        self.smbios_oem_strings.push(s.into());
+        self
+    }
+
+    /// Injects multiple SMBIOS OEM strings.
+    pub fn smbios_oem_strings(mut self, strings: Vec<String>) -> Self {
+        self.smbios_oem_strings.extend(strings);
+        self
+    }
+
+    /// Resolves the effective base data directory for the microVM.
+    fn resolve_data_dir(&self) -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        self.data_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(home).join(".cache/krun-microvm"))
+    }
+
+    /// Runs host virtualization and system preflight checks if enabled.
+    fn run_preflight(&self, data_dir: &Path) -> Result<()> {
+        let host_ports: Vec<u16> = self.port_forwards.iter().map(|p| p.host).collect();
+        let reports = Preflight::run_all(&host_ports, data_dir);
+        for r in &reports {
+            if !r.passed {
+                bail!("Preflight check '{}' failed: {}", r.name, r.message);
             }
         }
+        Ok(())
+    }
 
-        let is_direct_boot = matches!(
-            self.boot_payload,
-            Some(crate::types::BootPayload::Kernel(_))
-                | Some(crate::types::BootPayload::Firmware(_))
-                | Some(crate::types::BootPayload::Unikernel(_))
-        );
-
+    /// Generates a globally unique instance ID and ensures instance directories exist.
+    fn generate_instance(&self, data_dir: &Path) -> Result<(String, PathBuf, PathBuf)> {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
         let millis = now.as_millis();
         let nanos = now.subsec_nanos();
@@ -694,183 +724,176 @@ impl MicroVmBuilder {
         let instance_id = format!("vm-{millis}-{nanos:06}-{counter:03}");
         let instance_dir = data_dir.join("instances").join(&instance_id);
         let instance_rootfs = instance_dir.join("rootfs");
+        Ok((instance_id, instance_dir, instance_rootfs))
+    }
 
+    /// Resolves rootfs layers, performs CoW cloning, injects single-file mounts, and writes krun config.
+    async fn prepare_rootfs(
+        &self,
+        instance_id: &str,
+        instance_rootfs: &Path,
+        data_dir: &Path,
+        is_direct_boot: bool,
+    ) -> Result<()> {
         if is_direct_boot {
-            let _ = fs::create_dir_all(&instance_rootfs);
+            let _ = fs::create_dir_all(instance_rootfs);
+            return Ok(());
+        }
+
+        // Resolve rootfs (from bundle, local OCI layout, or OCI client pull)
+        let (cached_rootfs, oci_config) = if let Some(ref custom_rootfs) = self.rootfs_override {
+            let empty_cfg = crate::config::OciConfig {
+                entrypoint: Vec::new(),
+                cmd: Vec::new(),
+                env: Vec::new(),
+                working_dir: None,
+                user: None,
+            };
+            (custom_rootfs.clone(), empty_cfg)
         } else {
-            // 2. Resolve rootfs (from bundle, local OCI layout, or OCI client pull)
-            let (cached_rootfs, oci_config) = if let Some(ref custom_rootfs) = self.rootfs_override
-            {
-                let empty_cfg = crate::config::OciConfig {
-                    entrypoint: Vec::new(),
-                    cmd: Vec::new(),
-                    env: Vec::new(),
-                    working_dir: None,
-                    user: None,
-                };
-                (custom_rootfs.clone(), empty_cfg)
+            let reference = ImageReference::parse(&self.image)?;
+            if reference.is_local_layout {
+                let layout_path = reference
+                    .layout_path
+                    .as_ref()
+                    .context("Local OCI layout path missing in ImageReference")?;
+                tracing::info!(
+                    "Loading image from local OCI layout at {} (tag: {})...",
+                    layout_path.display(),
+                    reference.tag
+                );
+                crate::oci::OciLayout::load(layout_path, Some(&reference.tag), data_dir)?
             } else {
-                let reference = ImageReference::parse(&self.image)?;
-                if reference.is_local_layout {
-                    let layout_path = reference.layout_path.as_ref().unwrap();
-                    tracing::info!(
-                        "Loading image from local OCI layout at {} (tag: {})...",
-                        layout_path.display(),
-                        reference.tag
-                    );
-                    crate::oci::OciLayout::load(layout_path, Some(&reference.tag), &data_dir)?
-                } else {
-                    let oci_client = OciClient::new();
-                    tracing::info!(
-                        "Ensuring image '{}' is ready...",
-                        reference.canonical_name()
-                    );
-                    oci_client.pull_and_unpack(&reference, &data_dir).await?
-                }
-            };
-
-            tracing::info!("Cloning rootfs to instance {} (CoW)...", instance_id);
-            clone_rootfs(&cached_rootfs, &instance_rootfs)
-                .context("Failed to perform CoW clone of rootfs")?;
-
-            // 3b. Inject single-file mounts (e.g. Kubernetes ConfigMaps, Secrets, projected service account tokens)
-            for (src, dest) in &self.file_mounts {
-                let relative_dest = dest.strip_prefix("/").unwrap_or(dest);
-                let target_path = instance_rootfs.join(relative_dest);
-                if let Some(parent) = target_path.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                if let Err(e) = fs::copy(src, &target_path) {
-                    tracing::warn!(
-                        "Failed to copy file mount from {} to {}: {}",
-                        src.display(),
-                        target_path.display(),
-                        e
-                    );
-                } else {
-                    tracing::debug!(
-                        "Injected file mount {} -> {}",
-                        src.display(),
-                        target_path.display()
-                    );
-                }
+                let oci_client = OciClient::new();
+                tracing::info!(
+                    "Ensuring image '{}' is ready...",
+                    reference.canonical_name()
+                );
+                oci_client.pull_and_unpack(&reference, data_dir).await?
             }
+        };
 
-            // 4. Resolve Cmd, Env, and write /.krun_config.json
-            let mut final_cmd = if self.cmd_override.is_some() {
-                oci_config.resolve_cmd(self.cmd_override)
-            } else if !self.env_vars.is_empty() && oci_config.cmd.is_empty() {
-                // If created from bundle, cmd is already stored or defaults
-                oci_config.resolve_cmd(self.cmd_override)
+        tracing::info!("Cloning rootfs to instance {} (CoW)...", instance_id);
+        clone_rootfs(&cached_rootfs, instance_rootfs)
+            .context("Failed to perform CoW clone of rootfs")?;
+
+        // Inject single-file mounts (e.g. ConfigMaps, Secrets, service account tokens)
+        for (src, dest) in &self.file_mounts {
+            let relative_dest = dest.strip_prefix("/").unwrap_or(dest);
+            let target_path = instance_rootfs.join(relative_dest);
+            if let Some(parent) = target_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Err(e) = fs::copy(src, &target_path) {
+                tracing::warn!(
+                    "Failed to copy file mount from {} to {}: {}",
+                    src.display(),
+                    target_path.display(),
+                    e
+                );
             } else {
-                oci_config.resolve_cmd(self.cmd_override)
-            };
+                tracing::debug!(
+                    "Injected file mount {} -> {}",
+                    src.display(),
+                    target_path.display()
+                );
+            }
+        }
 
-            // If the command binary is not an absolute path, resolve it against standard guest rootfs PATH
-            if let Some(first) = final_cmd.first_mut() {
-                if !first.starts_with('/') {
-                    let search_paths = [
-                        "/usr/local/sbin",
-                        "/usr/local/bin",
-                        "/usr/sbin",
-                        "/usr/bin",
-                        "/sbin",
-                        "/bin",
-                    ];
-                    for sp in search_paths {
-                        let rel = sp.trim_start_matches('/');
-                        let candidate = instance_rootfs.join(rel).join(&first);
-                        if candidate.exists() {
-                            *first = format!("{sp}/{first}");
-                            break;
-                        }
+        // Resolve Cmd, Env, and standard guest rootfs PATH
+        let mut final_cmd = oci_config.resolve_cmd(self.cmd_override.clone());
+
+        if let Some(first) = final_cmd.first_mut() {
+            if !first.starts_with('/') {
+                let search_paths = [
+                    "/usr/local/sbin",
+                    "/usr/local/bin",
+                    "/usr/sbin",
+                    "/usr/bin",
+                    "/sbin",
+                    "/bin",
+                ];
+                for sp in search_paths {
+                    let rel = sp.trim_start_matches('/');
+                    let candidate = instance_rootfs.join(rel).join(&first);
+                    if candidate.exists() {
+                        *first = format!("{sp}/{first}");
+                        break;
                     }
                 }
             }
-
-            // 3c. Guarantee enterprise /tmp & /var/tmp sticky permissions (0o1777)
-            for tmp_rel in &["tmp", "var/tmp"] {
-                let p = instance_rootfs.join(tmp_rel);
-                let _ = fs::create_dir_all(&p);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o1777));
-                }
-            }
-
-            if !final_cmd.is_empty() {
-                let shm_sz = self.shm_size.as_deref().unwrap_or("64m");
-                let mut init_lines = Vec::new();
-                init_lines.push("#!/bin/sh".to_string());
-                init_lines.push(
-                    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
-                        .to_string(),
-                );
-                // Enterprise runtime hardening: sticky bit on /tmp & /var/tmp to prevent EACCES for unprivileged service users
-                init_lines.push("chmod 1777 /tmp /var/tmp 2>/dev/null || true".to_string());
-                // POSIX shared memory (/dev/shm) for PyTorch, Chromium, PostgreSQL
-                init_lines.push("mkdir -p /dev/shm 2>/dev/null || true".to_string());
-                init_lines.push(format!(
-                    "mount -t tmpfs -o rw,nosuid,nodev,mode=1777,size={shm_sz} tmpfs /dev/shm 2>/dev/null || true"
-                ));
-
-                if self.network_mode.is_gvproxy() {
-                    init_lines.push("ip link set eth0 up 2>/dev/null || true".to_string());
-                    init_lines.push("(udhcpc -i eth0 -q -n -t 2 || (ip addr add 192.168.127.2/24 dev eth0 && ip route add default via 192.168.127.1)) 2>/dev/null || true".to_string());
-                }
-
-                init_lines.push("exec \"$@\"".to_string());
-                init_lines.push("".to_string());
-
-                let init_script = init_lines.join("\n");
-                let script_path = instance_rootfs.join("krun-init.sh");
-                let _ = std::fs::write(&script_path, init_script);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &script_path,
-                        std::fs::Permissions::from_mode(0o755),
-                    );
-                }
-                final_cmd.insert(0, "/krun-init.sh".to_string());
-            }
-
-            let mut final_env = oci_config.env;
-            final_env.extend(self.env_vars);
-            if self.network_mode.is_gvproxy() {
-                final_env.push("KRUN_DHCP=1".to_string());
-            }
-            for (k, _) in &self.secrets {
-                final_env.push(format!("{k}=krun-secret:{k}"));
-            }
-            let final_workdir = self.workdir.or(oci_config.working_dir);
-
-            let krun_cfg = KrunConfig::new(final_cmd, final_env, final_workdir);
-            krun_cfg.write_to(&instance_rootfs)?;
         }
 
-        // 5. Locate runner binary (auto-codesigns if on macOS)
-        let runner_binary = match self.runner_path {
-            Some(p) => {
-                ensure_runner_signed(&p)?;
-                p
+        // Guarantee enterprise /tmp & /var/tmp sticky permissions (0o1777)
+        for tmp_rel in &["tmp", "var/tmp"] {
+            let p = instance_rootfs.join(tmp_rel);
+            let _ = fs::create_dir_all(&p);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o1777));
             }
-            None => find_runner_binary()?,
-        };
+        }
 
-        let final_console_log = if self.detach {
-            Some(
-                self.console_log_path
-                    .unwrap_or_else(|| instance_dir.join("console.log")),
-            )
-        } else {
-            self.console_log_path
-        };
+        if !final_cmd.is_empty() {
+            let shm_sz = self.shm_size.as_deref().unwrap_or("64m");
+            let mut init_lines = Vec::new();
+            init_lines.push("#!/bin/sh".to_string());
+            init_lines.push(
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+                    .to_string(),
+            );
+            init_lines.push("chmod 1777 /tmp /var/tmp 2>/dev/null || true".to_string());
+            init_lines.push("mkdir -p /dev/shm 2>/dev/null || true".to_string());
+            init_lines.push(format!(
+                "mount -t tmpfs -o rw,nosuid,nodev,mode=1777,size={shm_sz} tmpfs /dev/shm 2>/dev/null || true"
+            ));
 
-        // 5b. Attach any requested OCI artifacts (pull and add to VirtioFS)
-        let mut final_virtiofs_mounts = self.virtiofs_mounts;
+            if self.network_mode.is_gvproxy() {
+                init_lines.push("ip link set eth0 up 2>/dev/null || true".to_string());
+                init_lines.push("(udhcpc -i eth0 -q -n -t 2 || (ip addr add 192.168.127.2/24 dev eth0 && ip route add default via 192.168.127.1)) 2>/dev/null || true".to_string());
+            }
+
+            init_lines.push("exec \"$@\"".to_string());
+            init_lines.push("".to_string());
+
+            let init_script = init_lines.join("\n");
+            let script_path = instance_rootfs.join("krun-init.sh");
+            let _ = std::fs::write(&script_path, init_script);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
+            }
+            final_cmd.insert(0, "/krun-init.sh".to_string());
+        }
+
+        let mut final_env = oci_config.env;
+        final_env.extend(self.env_vars.clone());
+        if self.network_mode.is_gvproxy() {
+            final_env.push("KRUN_DHCP=1".to_string());
+        }
+        for (k, _) in &self.secrets {
+            final_env.push(format!("{k}=krun-secret:{k}"));
+        }
+        let final_workdir = self.workdir.clone().or(oci_config.working_dir);
+
+        let krun_cfg = KrunConfig::new(final_cmd, final_env, final_workdir);
+        krun_cfg.write_to(instance_rootfs)?;
+        Ok(())
+    }
+
+    /// Sets up VirtioFS mounts including OCI artifacts, CoW workspaces, and Nydus chunk cache.
+    async fn prepare_virtiofs_mounts(
+        &self,
+        instance_dir: &Path,
+        instance_rootfs: &Path,
+        data_dir: &Path,
+    ) -> Result<Vec<VirtioFsMount>> {
+        let mut final_virtiofs_mounts = self.virtiofs_mounts.clone();
+
+        // Attach requested OCI artifacts
         if !self.artifacts.is_empty() {
             let oci_client = OciClient::new();
             for art in &self.artifacts {
@@ -879,7 +902,7 @@ impl MicroVmBuilder {
                     "Ensuring OCI artifact '{}' is ready...",
                     art_ref.canonical_name()
                 );
-                let art_path = oci_client.pull_artifact(&art_ref, &data_dir).await?;
+                let art_path = oci_client.pull_artifact(&art_ref, data_dir).await?;
                 final_virtiofs_mounts.push(VirtioFsMount::new(
                     art.tag.clone(),
                     art_path,
@@ -888,7 +911,7 @@ impl MicroVmBuilder {
             }
         }
 
-        // 5c. Setup any requested CoW workspaces (APFS clonefile / FICLONE snapshot)
+        // Setup CoW workspaces (APFS clonefile / FICLONE snapshot)
         for ws in &self.cow_workspaces {
             let cow_dir = instance_dir.join("workspaces").join(&ws.tag);
             tracing::info!(
@@ -902,14 +925,10 @@ impl MicroVmBuilder {
                     ws.host_path.display()
                 )
             })?;
-            final_virtiofs_mounts.push(VirtioFsMount::new(
-                ws.tag.clone(),
-                cow_dir,
-                false, // Read-write isolated workspace!
-            ));
+            final_virtiofs_mounts.push(VirtioFsMount::new(ws.tag.clone(), cow_dir, false));
         }
 
-        // 5c-2. Attach accelerated Nydus chunk blob cache directory if lazy loading is enabled
+        // Attach accelerated Nydus chunk blob cache directory if lazy loading is enabled
         if let Some(ref acc) = self.image_acceleration {
             if acc.lazy_load {
                 let cache_dir = acc
@@ -935,8 +954,25 @@ impl MicroVmBuilder {
             let _ = fs::create_dir_all(instance_rootfs.join(&m.tag));
         }
 
-        // 5d. Setup network configuration files (resolv.conf, hosts, hostname) with autonomous resilient DNS
-        let guest_hostname = self.hostname.unwrap_or_else(|| instance_id.clone());
+        Ok(final_virtiofs_mounts)
+    }
+
+    /// Configures guest network files and starts the host egress proxy server if filtering is active.
+    async fn configure_networking(
+        &self,
+        instance_id: &str,
+        instance_dir: &Path,
+        instance_rootfs: &Path,
+    ) -> Result<(
+        String,
+        Option<crate::net::EgressProxyServer>,
+        Option<u16>,
+        Option<String>,
+    )> {
+        let guest_hostname = self
+            .hostname
+            .clone()
+            .unwrap_or_else(|| instance_id.to_string());
         if !self.no_network {
             let nameservers = crate::net::DnsConfig::resolve_nameservers(&self.dns_servers);
             tracing::info!(
@@ -945,22 +981,21 @@ impl MicroVmBuilder {
                 nameservers
             );
             crate::net::DnsConfig::write_network_files_with_aliases(
-                &instance_rootfs,
+                instance_rootfs,
                 &guest_hostname,
                 &nameservers,
                 &self.extra_hosts,
             )?;
         } else {
-            // In air-gapped mode, write loopback only
             crate::net::DnsConfig::write_network_files_with_aliases(
-                &instance_rootfs,
+                instance_rootfs,
                 &guest_hostname,
                 &[],
                 &[],
             )?;
         }
 
-        // 5e. Start host egress proxy server if filtering, secrets, token budget, or approvals are specified
+        // Start host egress proxy server if filtering, secrets, token budget, or approvals are specified
         let (egress_proxy, proxy_port) = if !self.allow_hosts.is_empty()
             || !self.secrets.is_empty()
             || self.max_tokens.is_some()
@@ -973,14 +1008,13 @@ impl MicroVmBuilder {
                 crate::net::EgressProxyServer::start(policy, secrets, budget).await?;
             let port = proxy_server.port();
             let url = proxy_server.proxy_url();
-            crate::net::DnsConfig::inject_proxy_environment(&instance_rootfs, &url)?;
+            crate::net::DnsConfig::inject_proxy_environment(instance_rootfs, &url)?;
             tracing::info!("Egress proxy active on port {port} for microVM {instance_id}");
             (Some(proxy_server), Some(port))
         } else {
             (None, None)
         };
 
-        // 5c. Setup user-mode gvproxy path if requested
         let final_net_sock_path = if self.network_mode.is_gvproxy() {
             let gvproxy_sock = instance_dir.join("gvproxy.sock");
             Some(gvproxy_sock.to_string_lossy().to_string())
@@ -990,8 +1024,16 @@ impl MicroVmBuilder {
             self.net_sock_path.clone()
         };
 
-        // Transparently prepare AArch64 raw kernel payloads (like m1n1.bin)
-        // macOS libkrun on Apple Silicon loads kernels via PeGz format decompressed at 0x8000_0000
+        Ok((
+            guest_hostname,
+            egress_proxy,
+            proxy_port,
+            final_net_sock_path,
+        ))
+    }
+
+    /// Prepares kernel payload transparently compressing raw AArch64 payloads on macOS Apple Silicon.
+    fn prepare_boot_payload(&self, instance_dir: &Path) -> Option<crate::types::BootPayload> {
         let mut final_boot_payload = self.boot_payload.clone();
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         if let Some(crate::types::BootPayload::Kernel(ref mut k)) = final_boot_payload {
@@ -1020,10 +1062,33 @@ impl MicroVmBuilder {
                 k.kernel_format = krun_sys::kernel_formats::KRUN_KERNEL_FORMAT_PE_GZ;
             }
         }
+        final_boot_payload
+    }
 
-        // 6. Spawn runner subprocess
+    /// Generates runner configuration JSON and locates the signed runner binary.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_runner_config(
+        &self,
+        instance_dir: &Path,
+        instance_rootfs: &Path,
+        final_boot_payload: Option<crate::types::BootPayload>,
+        final_net_sock_path: Option<String>,
+        final_virtiofs_mounts: Vec<VirtioFsMount>,
+        final_console_log: Option<PathBuf>,
+        proxy_port: Option<u16>,
+        guest_hostname: String,
+    ) -> Result<(PathBuf, PathBuf, PathBuf)> {
+        let runner_binary = match &self.runner_path {
+            Some(p) => {
+                ensure_runner_signed(p)?;
+                p.clone()
+            }
+            None => find_runner_binary()?,
+        };
+
+        let supervisor_sock = instance_dir.join("supervisor.sock");
         let runner_cfg = RunnerConfig {
-            root_path: instance_rootfs,
+            root_path: instance_rootfs.to_path_buf(),
             num_vcpus: self.vcpus,
             ram_mib: self.ram_mib,
             boot_payload: final_boot_payload,
@@ -1031,15 +1096,15 @@ impl MicroVmBuilder {
             port_forwards: self.port_forwards.clone(),
             net_sock_path: final_net_sock_path,
             virtiofs_mounts: final_virtiofs_mounts,
-            vsock_ports: self.vsock_ports,
-            console_log_path: final_console_log.clone(),
+            vsock_ports: self.vsock_ports.clone(),
+            console_log_path: final_console_log,
             log_level: self.log_level,
             interactive: self.interactive,
             tty: self.tty,
             no_network: self.no_network,
             gvproxy: self.network_mode.is_gvproxy(),
             netns: self.network_mode.netns_path().map(|p| p.to_path_buf()),
-            rlimits: self.rlimits,
+            rlimits: self.rlimits.clone(),
             detach: self.detach,
             dax_window_size_bytes: self.dax_window_size,
             image_acceleration: self.image_acceleration.clone(),
@@ -1055,10 +1120,11 @@ impl MicroVmBuilder {
             mtu: self.mtu,
             dns_servers: self.dns_servers.clone(),
             hostname: Some(guest_hostname),
-            supervisor_sock_path: Some(instance_dir.join("supervisor.sock")),
+            supervisor_sock_path: Some(supervisor_sock.clone()),
+            fs_overlays: self.fs_overlays.clone(),
+            smbios_oem_strings: self.smbios_oem_strings.clone(),
         };
 
-        let supervisor_sock = instance_dir.join("supervisor.sock");
         let runner_cfg_path = instance_dir.join("runner_config.json");
         let cfg_json = serde_json::to_string_pretty(&runner_cfg)?;
         std::fs::write(&runner_cfg_path, &cfg_json)?;
@@ -1069,17 +1135,27 @@ impl MicroVmBuilder {
                 std::fs::set_permissions(&runner_cfg_path, std::fs::Permissions::from_mode(0o600));
         }
 
+        Ok((runner_binary, runner_cfg_path, supervisor_sock))
+    }
+
+    /// Spawns the microVM runner child process with configured I/O and process credentials.
+    fn spawn_runner_process(
+        &self,
+        runner_binary: &Path,
+        runner_cfg_path: &Path,
+        final_console_log: Option<&Path>,
+    ) -> Result<(Child, Option<RawModeGuard>)> {
         tracing::info!("Spawning microvm runner (PID isolated)...");
 
-        let mut cmd = Command::new(&runner_binary);
-        cmd.arg("--config").arg(&runner_cfg_path);
+        let mut cmd = Command::new(runner_binary);
+        cmd.arg("--config").arg(runner_cfg_path);
         if !self.detach {
             cmd.kill_on_drop(true);
         }
 
         if self.detach {
             cmd.stdin(std::process::Stdio::null());
-            if let Some(ref log_path) = final_console_log {
+            if let Some(log_path) = final_console_log {
                 if let Some(parent) = log_path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -1123,17 +1199,31 @@ impl MicroVmBuilder {
             None
         };
 
-        let mut child = cmd.spawn().with_context(|| {
+        let child = cmd.spawn().with_context(|| {
             format!("Failed to spawn runner binary {}", runner_binary.display())
         })?;
 
-        // Wait briefly for supervisor socket readiness (with fallback if runner runs non-socket mode)
+        Ok((child, raw_guard))
+    }
+
+    /// Performs supervisor socket readiness handshake, registers VM instance state, and returns the running `MicroVm`.
+    #[allow(clippy::too_many_arguments)]
+    async fn wait_supervisor_ready(
+        &self,
+        mut child: Child,
+        supervisor_sock: &Path,
+        instance_id: &str,
+        instance_dir: &Path,
+        data_dir: &Path,
+        raw_guard: Option<RawModeGuard>,
+        egress_proxy: Option<crate::net::EgressProxyServer>,
+    ) -> Result<MicroVm> {
         let connect_timeout = Duration::from_secs(3);
         let start_time = std::time::Instant::now();
         let mut supervisor_ready = false;
         while start_time.elapsed() < connect_timeout {
             if supervisor_sock.exists() {
-                if let Ok(mut stream) = tokio::net::UnixStream::connect(&supervisor_sock).await {
+                if let Ok(mut stream) = tokio::net::UnixStream::connect(supervisor_sock).await {
                     if let Ok(Ok(msg)) = tokio::time::timeout(
                         Duration::from_millis(500),
                         crate::protocol::read_frame_async(&mut stream),
@@ -1156,25 +1246,27 @@ impl MicroVmBuilder {
                         .unwrap_or(0);
 
                     let vm_state = crate::state::VmState {
-                        id: instance_id.clone(),
+                        id: instance_id.to_string(),
                         pid,
                         image: self.image.clone(),
                         created_at: now,
                         port_forwards: self.port_forwards.clone(),
-                        instance_dir: instance_dir.clone(),
+                        instance_dir: instance_dir.to_path_buf(),
                         status: crate::state::VmStatus::Stopped,
                         vcpus: Some(self.vcpus),
                         memory_mib: Some(self.ram_mib),
                     };
-                    let _ = crate::state::StateManager::save(&data_dir, &vm_state);
+                    if let Err(e) = crate::state::StateManager::save(data_dir, &vm_state) {
+                        tracing::warn!(instance_id = %instance_id, error = %e, "Failed to persist stopped VM state to state manager");
+                    }
 
                     return Ok(MicroVm {
-                        id: instance_id,
+                        id: instance_id.to_string(),
                         child,
-                        instance_dir,
-                        data_dir,
+                        instance_dir: instance_dir.to_path_buf(),
+                        data_dir: data_dir.to_path_buf(),
                         is_detached: self.detach,
-                        supervisor_sock,
+                        supervisor_sock: supervisor_sock.to_path_buf(),
                         _raw_guard: raw_guard,
                         _proxy: egress_proxy,
                         _gvproxy: None,
@@ -1198,29 +1290,99 @@ impl MicroVmBuilder {
             .unwrap_or(0);
 
         let vm_state = crate::state::VmState {
-            id: instance_id.clone(),
+            id: instance_id.to_string(),
             pid,
             image: self.image.clone(),
             created_at: now,
             port_forwards: self.port_forwards.clone(),
-            instance_dir: instance_dir.clone(),
+            instance_dir: instance_dir.to_path_buf(),
             status: crate::state::VmStatus::Running,
             vcpus: Some(self.vcpus),
             memory_mib: Some(self.ram_mib),
         };
-        let _ = crate::state::StateManager::save(&data_dir, &vm_state);
+        if let Err(e) = crate::state::StateManager::save(data_dir, &vm_state) {
+            tracing::warn!(instance_id = %instance_id, error = %e, "Failed to persist running VM state to state manager");
+        }
 
         Ok(MicroVm {
-            id: instance_id,
+            id: instance_id.to_string(),
             child,
-            instance_dir,
-            data_dir,
+            instance_dir: instance_dir.to_path_buf(),
+            data_dir: data_dir.to_path_buf(),
             is_detached: self.detach,
-            supervisor_sock,
+            supervisor_sock: supervisor_sock.to_path_buf(),
             _raw_guard: raw_guard,
             _proxy: egress_proxy,
             _gvproxy: None,
         })
+    }
+
+    /// Pulls the image (if not cached), creates a CoW rootfs snapshot, prepares .krun_config.json,
+    /// and spawns the microVM runner subprocess.
+    pub async fn run(self) -> Result<MicroVm> {
+        let data_dir = self.resolve_data_dir();
+        if self.perform_preflight {
+            self.run_preflight(&data_dir)?;
+        }
+
+        let is_direct_boot = matches!(
+            self.boot_payload,
+            Some(crate::types::BootPayload::Kernel(_))
+                | Some(crate::types::BootPayload::Firmware(_))
+                | Some(crate::types::BootPayload::Unikernel(_))
+        );
+
+        let (instance_id, instance_dir, instance_rootfs) = self.generate_instance(&data_dir)?;
+        self.prepare_rootfs(&instance_id, &instance_rootfs, &data_dir, is_direct_boot)
+            .await?;
+
+        let final_virtiofs_mounts = self
+            .prepare_virtiofs_mounts(&instance_dir, &instance_rootfs, &data_dir)
+            .await?;
+
+        let (guest_hostname, egress_proxy, proxy_port, final_net_sock_path) = self
+            .configure_networking(&instance_id, &instance_dir, &instance_rootfs)
+            .await?;
+
+        let final_boot_payload = self.prepare_boot_payload(&instance_dir);
+
+        let final_console_log = if self.detach {
+            Some(
+                self.console_log_path
+                    .clone()
+                    .unwrap_or_else(|| instance_dir.join("console.log")),
+            )
+        } else {
+            self.console_log_path.clone()
+        };
+
+        let (runner_binary, runner_cfg_path, supervisor_sock) = self.prepare_runner_config(
+            &instance_dir,
+            &instance_rootfs,
+            final_boot_payload,
+            final_net_sock_path,
+            final_virtiofs_mounts,
+            final_console_log.clone(),
+            proxy_port,
+            guest_hostname,
+        )?;
+
+        let (child, raw_guard) = self.spawn_runner_process(
+            &runner_binary,
+            &runner_cfg_path,
+            final_console_log.as_deref(),
+        )?;
+
+        self.wait_supervisor_ready(
+            child,
+            &supervisor_sock,
+            &instance_id,
+            &instance_dir,
+            &data_dir,
+            raw_guard,
+            egress_proxy,
+        )
+        .await
     }
 }
 
@@ -1374,7 +1536,9 @@ impl MicroVm {
         } else if let Some(pid) = self.pid() {
             let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGSTOP);
         }
-        let _ = crate::state::StateManager::pause(&self.data_dir, &self.id);
+        if let Err(e) = crate::state::StateManager::pause(&self.data_dir, &self.id) {
+            tracing::warn!(instance_id = %self.id, error = %e, "Failed to update state to paused");
+        }
         Ok(())
     }
 
@@ -1391,7 +1555,9 @@ impl MicroVm {
         } else if let Some(pid) = self.pid() {
             let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT);
         }
-        let _ = crate::state::StateManager::resume(&self.data_dir, &self.id);
+        if let Err(e) = crate::state::StateManager::resume(&self.data_dir, &self.id) {
+            tracing::warn!(instance_id = %self.id, error = %e, "Failed to update state to resumed");
+        }
         Ok(())
     }
 
@@ -1465,9 +1631,13 @@ impl MicroVm {
 
     /// Explicitly purges instance state and directory from disk.
     pub fn purge(&self) {
-        let _ = crate::state::StateManager::remove(&self.data_dir, &self.id);
+        if let Err(e) = crate::state::StateManager::remove(&self.data_dir, &self.id) {
+            tracing::warn!(instance_id = %self.id, error = %e, "Failed to remove VM state during purge");
+        }
         if self.instance_dir.exists() {
-            let _ = std::fs::remove_dir_all(&self.instance_dir);
+            if let Err(e) = std::fs::remove_dir_all(&self.instance_dir) {
+                tracing::warn!(instance_dir = ?self.instance_dir, error = %e, "Failed to remove instance directory during purge");
+            }
         }
     }
 

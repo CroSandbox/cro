@@ -4,18 +4,26 @@ use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
+pub mod approval;
 pub mod egress;
 pub mod gateway;
 pub mod gvproxy;
+pub mod host_matcher;
+pub mod injection;
 pub mod pingora;
 
 pub use crate::types::PortForward;
-pub use egress::{EgressPolicy, EgressProxyServer, LlmTokenBudget, SecretSubstitution};
-pub use gateway::{
-    ApprovalPolicy, ApprovalStatus, ApprovalStore, ApprovalTrigger, CredentialInjectionRule,
-    HeaderInjectionEngine, InjectionAction, PendingApproval, RequestSummarizer, VaultResolver,
+pub use approval::{
+    ApprovalPolicy, ApprovalStatus, ApprovalStore, ApprovalTrigger, PendingApproval,
+    RequestSummarizer,
 };
+pub use egress::{EgressPolicy, EgressProxyServer, LlmTokenBudget, SecretSubstitution};
+pub use gateway::VaultResolver;
 pub use gvproxy::{GvproxyConfig, GvproxyInstance};
+pub use host_matcher::{
+    host_pattern_matches, host_pattern_matches_strict_subdomain, host_pattern_matches_with_apex,
+};
+pub use injection::{CredentialInjectionRule, HeaderInjectionEngine, InjectionAction};
 pub use pingora::{
     create_pingora_egress_service, create_pingora_gateway_service, run_pingora_egress_server,
     run_pingora_gateway_server, MicroVmServiceBackend, PingoraEgressProxy, PingoraMicroVmGateway,

@@ -18,7 +18,7 @@ pub struct SupervisorServer {
 impl SupervisorServer {
     /// Binds the supervisor Unix domain socket, restricts permissions to 0600,
     /// and spawns a background thread to handle parent lifecycle commands.
-    pub fn start(sock_path: &Path) -> Result<Self> {
+    pub fn start(sock_path: &Path, shutdown_efd: Option<i32>) -> Result<Self> {
         if let Some(parent) = sock_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -42,7 +42,7 @@ impl SupervisorServer {
         thread::Builder::new()
             .name("supervisor-ipc".into())
             .spawn(move || {
-                run_listener_loop(listener, active_stream_clone);
+                run_listener_loop(listener, active_stream_clone, shutdown_efd);
             })
             .context("Failed to spawn supervisor IPC listener thread")?;
 
@@ -51,6 +51,7 @@ impl SupervisorServer {
             active_stream,
         })
     }
+
 
     /// Emits a `Booted` lifecycle event to the connected parent.
     pub fn emit_booted(&self) {
@@ -113,7 +114,11 @@ impl Drop for SupervisorServer {
     }
 }
 
-fn run_listener_loop(listener: UnixListener, shared_stream: Arc<Mutex<Option<UnixStream>>>) {
+fn run_listener_loop(
+    listener: UnixListener,
+    shared_stream: Arc<Mutex<Option<UnixStream>>>,
+    shutdown_efd: Option<i32>,
+) {
     for incoming in listener.incoming() {
         match incoming {
             Ok(mut stream) => {
@@ -142,7 +147,7 @@ fn run_listener_loop(listener: UnixListener, shared_stream: Arc<Mutex<Option<Uni
                 }
 
                 // 3. Command loop for this connection
-                handle_client_connection(&mut stream);
+                handle_client_connection(&mut stream, shutdown_efd);
 
                 // Clear shared stream on disconnect
                 if let Ok(mut guard) = shared_stream.lock() {
@@ -156,7 +161,7 @@ fn run_listener_loop(listener: UnixListener, shared_stream: Arc<Mutex<Option<Uni
     }
 }
 
-fn handle_client_connection(stream: &mut UnixStream) {
+fn handle_client_connection(stream: &mut UnixStream, shutdown_efd: Option<i32>) {
     loop {
         let msg = match read_frame_sync(stream) {
             Ok(m) => m,
@@ -206,7 +211,7 @@ fn handle_client_connection(stream: &mut UnixStream) {
                 let _ = write_frame_sync(stream, &reply);
             }
             MessagePayload::Stop {
-                timeout_secs: _,
+                timeout_secs,
                 force,
             } => {
                 let reply = ControlMessage::new(
@@ -219,6 +224,28 @@ fn handle_client_connection(stream: &mut UnixStream) {
                 let _ = write_frame_sync(stream, &reply);
                 if force {
                     std::process::exit(130);
+                } else if let Some(efd) = shutdown_efd {
+                    // Signal orderly ACPI / GPIO guest shutdown via eventfd
+                    let val: u64 = 1;
+                    let written = unsafe {
+                        libc::write(
+                            efd,
+                            &val as *const u64 as *const libc::c_void,
+                            std::mem::size_of::<u64>(),
+                        )
+                    };
+                    if written <= 0 {
+                        unsafe {
+                            libc::kill(libc::getpid(), libc::SIGTERM);
+                        }
+                    } else if timeout_secs > 0 {
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_secs(timeout_secs as u64));
+                            unsafe {
+                                libc::kill(libc::getpid(), libc::SIGKILL);
+                            }
+                        });
+                    }
                 } else {
                     unsafe {
                         libc::kill(libc::getpid(), libc::SIGTERM);
@@ -241,3 +268,4 @@ fn handle_client_connection(stream: &mut UnixStream) {
         }
     }
 }
+

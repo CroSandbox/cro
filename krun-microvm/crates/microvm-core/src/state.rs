@@ -137,9 +137,127 @@ pub fn atomic_write<P: AsRef<Path>, C: AsRef<[u8]>>(dest: P, contents: C) -> Res
     Ok(())
 }
 
-pub struct StateManager;
+/// Manages persistence, lifecycle transitions, and inspect/prune/snapshot operations for microVM instances.
+///
+/// Can be instantiated with a specific `data_dir` to manage state with dependency injection,
+/// or used via static helper methods taking `&Path`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateManager {
+    data_dir: PathBuf,
+}
 
 impl StateManager {
+    /// Creates a new `StateManager` bound to the given base data directory.
+    pub fn new(data_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            data_dir: data_dir.into(),
+        }
+    }
+
+    /// Returns the base data directory managed by this instance.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    /// Directory where JSON state files are saved (`<data_dir>/state`).
+    pub fn state_dir_path(&self) -> PathBuf {
+        Self::state_dir(&self.data_dir)
+    }
+
+    /// Saves or updates the state of a microVM instance.
+    pub fn save_state(&self, state: &VmState) -> Result<PathBuf> {
+        Self::save(&self.data_dir, state)
+    }
+
+    /// Removes the state file for a microVM instance by ID.
+    pub fn remove_state(&self, id: &str) -> Result<()> {
+        Self::remove(&self.data_dir, id)
+    }
+
+    /// Lists all persisted microVM instances, sorted by newest first.
+    pub fn list_states(&self) -> Result<Vec<VmState>> {
+        Self::list(&self.data_dir)
+    }
+
+    /// Finds a microVM by exact ID, ID prefix, or PID.
+    pub fn find_state(&self, id_or_pid: &str) -> Result<Option<VmState>> {
+        Self::find(&self.data_dir, id_or_pid)
+    }
+
+    /// Pauses execution of a running microVM.
+    pub fn pause_vm(&self, id_or_pid: &str) -> Result<VmState> {
+        Self::pause(&self.data_dir, id_or_pid)
+    }
+
+    /// Resumes execution of a paused microVM.
+    pub fn resume_vm(&self, id_or_pid: &str) -> Result<VmState> {
+        Self::resume(&self.data_dir, id_or_pid)
+    }
+
+    /// Dynamically resizes CPU and/or RAM limits of a running microVM.
+    pub fn resize_vm(
+        &self,
+        id_or_pid: &str,
+        memory_mib: Option<u32>,
+        vcpus: Option<u8>,
+    ) -> Result<VmState> {
+        Self::resize(&self.data_dir, id_or_pid, memory_mib, vcpus)
+    }
+
+    /// Deletes a microVM instance state and instance directory.
+    pub fn delete_vm(&self, id_or_pid: &str, force: bool) -> Result<VmState> {
+        Self::delete(&self.data_dir, id_or_pid, force)
+    }
+
+    /// Stops a running microVM.
+    pub fn stop_vm(&self, id_or_pid: &str) -> Result<()> {
+        Self::stop(&self.data_dir, id_or_pid)
+    }
+
+    /// Prunes dead instances and temporary staging directories.
+    pub fn prune_vms(&self) -> Result<PruneSummary> {
+        Self::prune(&self.data_dir)
+    }
+
+    /// Copies a host file or directory into a microVM's rootfs.
+    pub fn copy_into_vm(
+        &self,
+        id_or_pid: &str,
+        src_host: &Path,
+        guest_rel_path: &str,
+    ) -> Result<()> {
+        Self::copy_into(&self.data_dir, id_or_pid, src_host, guest_rel_path)
+    }
+
+    /// Copies a file or directory from a microVM's rootfs to the host.
+    pub fn copy_from_vm(
+        &self,
+        id_or_pid: &str,
+        guest_rel_path: &str,
+        dst_host: &Path,
+    ) -> Result<()> {
+        Self::copy_from(&self.data_dir, id_or_pid, guest_rel_path, dst_host)
+    }
+
+    /// Executes a command in a running microVM.
+    pub async fn exec_in_vm(
+        &self,
+        id_or_pid: &str,
+        req: &crate::exec::ExecRequest,
+    ) -> Result<crate::exec::ExecResponse> {
+        Self::exec(&self.data_dir, id_or_pid, req).await
+    }
+
+    /// Captures a live or stopped microVM's state and rootfs into a snapshot package.
+    pub fn snapshot_vm(&self, id_or_pid: &str, output_path: &Path) -> Result<SnapshotManifest> {
+        Self::snapshot(&self.data_dir, id_or_pid, output_path)
+    }
+
+    /// Restores a snapshot into a new microVM instance ready for immediate execution.
+    pub fn restore_vm(&self, snapshot_path: &Path, new_id: Option<&str>) -> Result<VmState> {
+        Self::restore(&self.data_dir, snapshot_path, new_id)
+    }
+
     pub fn state_dir(data_dir: &Path) -> PathBuf {
         data_dir.join("state")
     }
@@ -977,6 +1095,8 @@ mod tests {
             dns_servers: vec![],
             hostname: None,
             supervisor_sock_path: None,
+            fs_overlays: vec![],
+            smbios_oem_strings: vec![],
         };
         fs::write(
             instance_dir.join("runner_config.json"),
@@ -1178,5 +1298,37 @@ mod tests {
 
         let loaded = StateManager::find(dir.path(), "vm-concurrent").unwrap();
         assert!(loaded.is_some());
+    }
+
+    #[test]
+    fn test_state_manager_instance_methods() {
+        let dir = tempdir().unwrap();
+        let mgr = StateManager::new(dir.path());
+        assert_eq!(mgr.data_dir(), dir.path());
+        assert_eq!(mgr.state_dir_path(), dir.path().join("state"));
+
+        let vm = VmState {
+            id: "vm-inst-1".to_string(),
+            pid: std::process::id(),
+            image: "alpine:latest".to_string(),
+            created_at: 1000,
+            port_forwards: vec![],
+            instance_dir: dir.path().join("instances/vm-inst-1"),
+            status: VmStatus::Running,
+            vcpus: Some(2),
+            memory_mib: Some(512),
+        };
+
+        mgr.save_state(&vm).unwrap();
+        let list = mgr.list_states().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "vm-inst-1");
+
+        let found = mgr.find_state("vm-inst-1").unwrap();
+        assert!(found.is_some());
+
+        mgr.remove_state("vm-inst-1").unwrap();
+        let list_after = mgr.list_states().unwrap();
+        assert!(list_after.is_empty());
     }
 }

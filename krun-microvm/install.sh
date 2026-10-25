@@ -35,13 +35,16 @@ log_step() {
     printf "\n${CYAN}${BOLD}==> %s${NC}\n" "$1"
 }
 
-# --- Determine Script and Workspace Directory ---
+# --- Determine Script, Root, and Workspace Directory ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/Cargo.toml" ] && grep -q "krun-microvm" "$SCRIPT_DIR/Cargo.toml" 2>/dev/null; then
-    WORKSPACE_DIR="$SCRIPT_DIR"
-elif [ -d "$SCRIPT_DIR/krun-microvm" ]; then
+if [ -f "$SCRIPT_DIR/krun-microvm/Cargo.toml" ]; then
+    ROOT_DIR="$SCRIPT_DIR"
     WORKSPACE_DIR="$SCRIPT_DIR/krun-microvm"
+elif [ -f "$SCRIPT_DIR/Cargo.toml" ]; then
+    WORKSPACE_DIR="$SCRIPT_DIR"
+    ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 else
+    ROOT_DIR="$SCRIPT_DIR"
     WORKSPACE_DIR="$SCRIPT_DIR"
 fi
 
@@ -51,6 +54,7 @@ cd "$WORKSPACE_DIR"
 BUILD_MODE="release"
 DO_BUILD=true
 SKIP_DEPS=false
+SKIP_SUBMODULES=false
 AUTO_YES=false
 DO_SIGN=true
 PREFIX=""
@@ -68,6 +72,7 @@ ${BOLD}OPTIONS:${NC}
     --debug              Build with debug profile instead of release
     --no-build           Skip cargo build (use already compiled binaries from target/)
     --skip-deps          Skip checking/installing system dependencies (libkrun, rust, etc.)
+    --skip-submodules    Skip updating git submodules (libkrun, libkrunfw)
     --no-sign            Skip macOS codesign with Hypervisor entitlements
     -y, --yes            Automatic yes to prompts (non-interactive mode)
     -h, --help           Show this help message and exit
@@ -98,6 +103,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-deps)
             SKIP_DEPS=true
+            shift
+            ;;
+        --skip-submodules)
+            SKIP_SUBMODULES=true
             shift
             ;;
         --no-sign)
@@ -140,10 +149,27 @@ printf "${CYAN}${BOLD}     libkrun-microvm System Installation Tool        ${NC}
 printf "${BOLD}======================================================${NC}\n"
 printf "OS:                  ${BOLD}%s${NC}\n" "$OS"
 printf "Architecture:        ${BOLD}%s${NC}\n" "$ARCH"
+printf "Root Directory:      ${BOLD}%s${NC}\n" "$ROOT_DIR"
 printf "Workspace:           ${BOLD}%s${NC}\n" "$WORKSPACE_DIR"
 printf "Target Directory:    ${BOLD}%s${NC}\n" "$PREFIX"
 printf "Build Profile:       ${BOLD}%s${NC}\n" "$BUILD_MODE"
 printf "${BOLD}======================================================${NC}\n\n"
+
+# ==============================================================================
+# 0. GIT SUBMODULES UPDATE
+# ==============================================================================
+if [ "$SKIP_SUBMODULES" = false ]; then
+    if [ -d "$ROOT_DIR/.git" ] || [ -f "$ROOT_DIR/.git" ]; then
+        log_step "Updating Git Submodules (libkrun & libkrunfw)"
+        if command -v git &>/dev/null; then
+            log_info "Ensuring submodules are checked out in $ROOT_DIR..."
+            (cd "$ROOT_DIR" && git submodule update --init --recursive) || log_warn "Git submodule update finished with warnings."
+            log_success "Submodules verified."
+        else
+            log_warn "git command not found; skipping submodule update."
+        fi
+    fi
+fi
 
 # ==============================================================================
 # 1. PREREQUISITE CHECK & INSTALLATION
@@ -301,6 +327,12 @@ if [ "$OS" = "Darwin" ] && [ "$DO_SIGN" = true ]; then
     log_step "Applying macOS Hypervisor.framework Code Signing Entitlements"
     
     ENTITLEMENTS_FILE="$WORKSPACE_DIR/entitlements.plist"
+    if [ ! -f "$ENTITLEMENTS_FILE" ] && [ -f "$ROOT_DIR/krun-microvm/entitlements.plist" ]; then
+        ENTITLEMENTS_FILE="$ROOT_DIR/krun-microvm/entitlements.plist"
+    elif [ ! -f "$ENTITLEMENTS_FILE" ] && [ -f "$ROOT_DIR/entitlements.plist" ]; then
+        ENTITLEMENTS_FILE="$ROOT_DIR/entitlements.plist"
+    fi
+
     if [ -f "$ENTITLEMENTS_FILE" ]; then
         log_info "Signing binaries with $ENTITLEMENTS_FILE..."
         codesign --entitlements "$ENTITLEMENTS_FILE" --force -s - "$BIN_RUNNER"
@@ -309,7 +341,7 @@ if [ "$OS" = "Darwin" ] && [ "$DO_SIGN" = true ]; then
         codesign --entitlements "$ENTITLEMENTS_FILE" --force -s - "$BIN_OPERATOR"
         log_success "All binaries signed with com.apple.security.hypervisor entitlement."
     else
-        log_warn "entitlements.plist not found at $ENTITLEMENTS_FILE; skipping codesign."
+        log_warn "entitlements.plist not found; skipping codesign."
     fi
 fi
 

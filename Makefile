@@ -1,4 +1,4 @@
-.PHONY: all help build release test sign clean install preflight info submodules libkrun libkrunfw
+.PHONY: all help build release test check clippy fmt sign clean install preflight info submodules libkrun libkrunfw
 
 PREFIX ?= /usr/local/bin
 WORKSPACE_DIR := $(CURDIR)/krun-microvm
@@ -13,7 +13,10 @@ help:
 	@echo "Core Targets:"
 	@echo "  make build       - Compile all SDK workspace crates (debug mode)"
 	@echo "  make release     - Compile all SDK binaries with optimizations & codesign"
-	@echo "  make test        - Run all 129+ unit & integration tests"
+	@echo "  make test        - Run all 184+ unit & integration tests"
+	@echo "  make check       - Type-check all workspace crates"
+	@echo "  make clippy      - Run clippy linter with strict flags (-D warnings)"
+	@echo "  make fmt         - Check code formatting across workspace"
 	@echo "  make sign        - Apply macOS Hypervisor.framework entitlement to binaries"
 	@echo "  make install     - Install all binaries (cro, microvm, runner, shim, operator)"
 	@echo "  make preflight   - Run system virtualization preflight validation"
@@ -36,6 +39,15 @@ release:
 
 test:
 	$(MAKE) -C $(WORKSPACE_DIR) test
+
+check:
+	$(MAKE) -C $(WORKSPACE_DIR) check
+
+clippy:
+	$(MAKE) -C $(WORKSPACE_DIR) clippy
+
+fmt:
+	$(MAKE) -C $(WORKSPACE_DIR) fmt
 
 sign:
 	$(MAKE) -C $(WORKSPACE_DIR) sign

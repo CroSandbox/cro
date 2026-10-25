@@ -162,3 +162,47 @@ int krun_start_enter(unsigned int ctx_id) {
     return 0;
 }
 
+int krun_get_shutdown_eventfd(unsigned int ctx_id) {
+    (void)ctx_id;
+    return -1;
+}
+
+int krun_add_disk2(unsigned int ctx_id, const char *block_id, const char *disk_path, unsigned int disk_format, _Bool read_only) {
+    (void)ctx_id; (void)block_id; (void)disk_path; (void)disk_format; (void)read_only;
+    return 0;
+}
+
+int krun_add_disk3(unsigned int ctx_id, const char *block_id, const char *disk_path, unsigned int disk_format, _Bool read_only, _Bool direct_io, unsigned int sync_mode) {
+    (void)ctx_id; (void)block_id; (void)disk_path; (void)disk_format; (void)read_only; (void)direct_io; (void)sync_mode;
+    return 0;
+}
+
+int krun_add_virtiofs3(unsigned int ctx_id, const char *tag, const char *path, unsigned long long shm_size, _Bool read_only) {
+    (void)ctx_id; (void)tag; (void)path; (void)shm_size; (void)read_only;
+    return 0;
+}
+
+int krun_fs_add_overlay_file(unsigned int ctx_id, const char *fs_tag, const char *path, const unsigned char *data, unsigned long data_len, unsigned int mode, _Bool one_shot) {
+    (void)ctx_id; (void)fs_tag; (void)path; (void)data; (void)data_len; (void)mode; (void)one_shot;
+    return 0;
+}
+
+int krun_fs_add_overlay_dir(unsigned int ctx_id, const char *fs_tag, const char *path, unsigned int mode) {
+    (void)ctx_id; (void)fs_tag; (void)path; (void)mode;
+    return 0;
+}
+
+int krun_set_smbios_oem_strings(unsigned int ctx_id, const char *const oem_strings[]) {
+    (void)ctx_id; (void)oem_strings;
+    return 0;
+}
+
+int krun_has_feature(unsigned long long feature) {
+    (void)feature;
+    return 1;
+}
+
+int krun_get_max_vcpus(void) {
+    return 32;
+}
+
