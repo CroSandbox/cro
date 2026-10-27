@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)%20%7C%20Linux%20(KVM)-black.svg?style=for-the-badge&logo=apple)](https://github.com/CroSandbox/cro)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-134%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
+[![Tests](https://img.shields.io/badge/tests-184%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
 [![Cold Boot](https://img.shields.io/badge/boot_time-%3C100ms-success.svg?style=for-the-badge&logo=lightning)](https://github.com/CroSandbox/cro)
 [![Compose](https://img.shields.io/badge/orchestration-Docker%20Compose%20%7C%20K8s%20CRD-purple.svg?style=for-the-badge&logo=docker)](examples/krun-compose.yaml)
 
@@ -19,7 +19,7 @@
   Sub-100ms cold boot times • Apple Silicon Metal & Linux DRM Venus GPU acceleration • Native Docker Compose orchestration • Zero-trust AI agent sandboxing • Zero CGO & zero runtime overhead.
 </p>
 
-[Quickstart](#-quickstart-in-30-seconds) • [Why CRO?](#-why-cro) • [Compose & YAML](#-declarative-compose--yaml) • [Architecture](#-architectural-dominance-cro-vs-alternatives) • [AI Sandboxing](#-ai-agent-sandboxing--gpu) • [Kubernetes](#-kubernetes--containerd-integration) • [Commands](#-complete-cli-command-reference) • [SDKs](#-multi-language-client-sdks)
+[Quickstart](#-quickstart-in-30-seconds) • [Why CRO?](#-why-cro) • [Compose & YAML](#-declarative-compose--yaml) • [Architecture](#-architectural-dominance-cro-vs-alternatives) • [AI Sandboxing & HITL](#-ai-agent-sandboxing--gpu) • [Zero-Trust Networking](#-advanced-microvm-networking--zero-trust-security) • [Kubernetes](#-kubernetes--containerd-integration) • [Commands](#-complete-cli-command-reference) • [SDKs](#-multi-language-client-sdks)
 
 ---
 
@@ -66,7 +66,7 @@ cro compose logs -f
 cro compose down -f examples/krun-compose.yaml
 ```
 
-### 4. Launch an Isolated AI Coding Agent Sandbox with Git Cherry-Pick
+### 4. Launch an Isolated AI Coding Agent Sandbox with Git Cherry-Pick & HITL Gateway
 ```bash
 # Isolated workspace with copy-on-write filesystem, git cherry-pick, and auto-sync:
 cro sandbox claude \
@@ -75,8 +75,12 @@ cro sandbox claude \
     --apply-to-host \
     --secret ANTHROPIC_API_KEY=env:ANTHROPIC_API_KEY
 
-# Or cherry-pick any past sandbox commits on demand:
-cro cherry-pick <sandbox-id>
+# Or launch with Human-in-the-Loop (HITL) approval gateway and dynamic 1Password vault injection:
+cro sandbox dev \
+    --hitl \
+    --secret "ANTHROPIC_API_KEY=op://ai-vault/anthropic-key" \
+    --allow-host api.anthropic.com:443 \
+    -- python agent.py
 ```
 
 ### 5. Build Container Images In-Process (No Docker Daemon Required)
@@ -100,7 +104,7 @@ cro kube down pod.yaml
 ### 7. Launch the Unstructured Document Intake & AI Threat Shield (`/unstructured`)
 ```bash
 # Start the Elixir OTP server with Web UI and REST API:
-cd krun-microvm/sdks/elixir && PORT=4005 mix run --no-halt
+cd sdks/elixir && PORT=4005 mix run --no-halt
 
 # Open the Web UI:
 open http://localhost:4005/unstructured
@@ -140,8 +144,8 @@ Hardware-accelerated virtio-gpu (Apple Silicon Metal & Linux DRM Venus). Native 
 </td>
 <td width="33%" valign="top">
 
-### 🔒 Zero-Trust AI Sandboxing
-Automated agent sandboxes with egress domain allowlists (blocks AWS metadata SSRF `169.254.169.254`), in-flight secret substitution, and streaming LLM token budget meters.
+### 🔒 Zero-Trust AI Sandboxing & HITL
+Automated agent sandboxes with egress domain allowlists (blocks AWS metadata SSRF `169.254.169.254`), Human-in-the-Loop approval wire-hold, in-flight secret substitution, and streaming LLM token budget meters.
 
 </td>
 <td width="33%" valign="top">
@@ -169,6 +173,9 @@ Official containerd v2 TTRPC shim (`containerd-shim-krun-v2`) and pure-Rust `kub
 | **VirtioFS DAX (LLM Weights)** | ❌ | ❌ | Complex block setup | **✅ Zero-Copy Shared Memory Window** |
 | **Zero-Trust Egress & Secret Proxy** | ❌ | ❌ (Manual iptables) | ❌ | **✅ Built-in Host Security Proxy** |
 | **Direct OCI Execution** | ✅ | ❌ (Requires raw rootfs) | ✅ | **✅ Direct OCI Image & Registry Pull** |
+| **Disk Image Formats** | Raw overlay | Raw only | QEMU formats | **✅ RAW, QCOW2 & VMDK (macOS Relaxed Sync)** |
+| **Orderly Shutdown Signaling** | SIGTERM to PID 1 | Serial / API | ACPI | **✅ ACPI / GPIO EventFd Interrupt** |
+| **In-Memory FS Overlays** | ❌ (Requires temp files) | ❌ | ❌ | **✅ Zero-Disk Virtual Injections (`one_shot`)** |
 
 ---
 
@@ -225,8 +232,17 @@ cro compose logs -f
 # Validate and inspect resolved configuration:
 cro compose config
 
-# Stop and gracefully clean up all microVM instances and networks:
-cro compose down
+# Stop running services without removing container state:
+cro compose stop
+
+# Start previously stopped services:
+cro compose start
+
+# Restart microVM services:
+cro compose restart
+
+# Stop and gracefully clean up all microVM instances, networks, and volumes:
+cro compose down -v
 ```
 
 ### 3. Kubernetes Declarative MicroVm CRD (`cro apply`)
@@ -375,7 +391,57 @@ cro sandbox claude \
 - **In-Flight Secret Substitution**: Injected API keys are replaced by the host proxy in-flight (`krun-secret:ANTHROPIC_API_KEY`); the guest VM never holds the raw credential in RAM.
 - **LLM Token Ceilings**: Enforce hard token budgets with `--max-tokens 50000` to prevent runaway API spend.
 
-### 2. Isolated Git Cherry-Pick & Bi-Directional Commit Syncing
+### 2. Human-in-the-Loop (HITL) Gateway & Dynamic Vault Injection (OneCLI Architecture)
+Drawing directly from zero-trust agent security paradigms (such as [OneCLI](https://github.com/onecli/onecli)), `cro` features an advanced **Human-in-the-Loop (HITL) Gateway** integrated directly into the Cloudflare Pingora L7 proxy:
+
+```bash
+# Launch an agent sandbox with HITL approval and external vault secret resolution:
+cro sandbox \
+    --hitl \
+    --secret "ANTHROPIC_API_KEY=op://ai-vault/anthropic-key" \
+    --secret "GITHUB_TOKEN=bw://tokens/github-pat" \
+    --allow-host api.anthropic.com:443 \
+    --allow-host api.github.com:443 \
+    -- python agent.py
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Dev as Human Reviewer
+    participant Agent as Autonomous Agent (MicroVM)
+    participant Pingora as Pingora L7 Egress Proxy
+    participant Store as Approval IPC Queue
+    participant Upstream as External API (Anthropic / GitHub)
+
+    Agent->>Pingora: Outbound POST /repos/.../releases (Uncredentialed)
+    Note over Pingora: Match HITL Policy: POST is Mutating
+    Pingora->>Store: Pause connection & register pending approval
+    Store-->>Dev: Alert: appr-89a1c pending decision
+    Dev->>Store: cro approval approve appr-89a1c
+    Store->>Pingora: Resume connection
+    Pingora->>Pingora: In-flight header injection (resolve op://vault)
+    Pingora->>Upstream: Authorized POST with Bearer token
+    Upstream-->>Pingora: 201 Created
+    Pingora-->>Agent: 201 Created (Seamless to guest)
+```
+
+- **Zero Credentials in MicroVM**: API keys and tokens are **never** passed into container environment variables, filesystem configs, or RAM. The guest agent issues requests uncredentialed or with placeholder headers; Pingora resolves the real secret dynamically from 1Password (`op://`), Bitwarden (`bw://`), environment variables (`env:`), or secure files (`file:`) and injects it on the wire.
+- **Mutating Request Hold**: Any outbound request attempting state mutations (`POST`, `PUT`, `DELETE`, `PATCH`, destructive endpoints) is suspended in-flight at the L7 proxy.
+- **Cross-Process IPC Approval Queue**: Review and unblock paused connections from another terminal tab or automation script:
+  ```bash
+  # View all outbound requests currently held on the wire:
+  cro approval list
+
+  # Approve and resume the request:
+  cro approval approve appr-89a1c
+
+  # Or deny with HTTP 403 Forbidden sent to the agent:
+  cro approval deny appr-89a1c --reason "Unsanitized release deletion attempt"
+  ```
+- **Realtime WebUI Approvals Dashboard**: Visual cards with payload previews, automated threat summarization, and one-click approve/deny controls in the `/unstructured` WebUI.
+
+### 3. Isolated Git Cherry-Pick & Bi-Directional Commit Syncing
 Test feature branches or pull requests inside a safe microVM without altering your local working directory:
 
 ```bash
@@ -396,7 +462,7 @@ cro cherry-pick <microvm-id> -w .
 - **Automatic Host Application (`--apply-to-host`)**: Detects new git commits made by the AI agent in the CoW workspace and cleanly applies them via `git am --3way` upon exit.
 - **Zero Risk**: If the cherry-pick conflicts or the agent breaks the codebase, your host files and git history remain pristine.
 
-### 3. Hardware-Accelerated Local LLM Inference
+### 4. Hardware-Accelerated Local LLM Inference
 Leverage Apple Silicon Metal or Linux DRM Venus GPU passthrough:
 
 ```bash
@@ -408,7 +474,7 @@ cro run \
     ghcr.io/ericlbuehler/mistral.rs:latest
 ```
 
-### 4. High-Performance AI POSIX Shared Memory (`--shm-size` & `/dev/shm`)
+### 5. High-Performance AI POSIX Shared Memory (`--shm-size` & `/dev/shm`)
 
 High-performance AI/ML workflows (PyTorch multi-process `DataLoader(num_workers > 0)`, Hugging Face Transformers) and headless Chromium (Playwright / Puppeteer) require dedicated POSIX shared memory. Without it, PyTorch crashes with `RuntimeError: unable to write to /dev/shm`.
 
@@ -427,6 +493,34 @@ cro run --shm-size 512m mcr.microsoft.com/playwright:v1.45.0
 ```
 
 - **Dual-Layer Hardened Sticky Bits**: Guarantees `/tmp`, `/var/tmp`, and `/dev/shm` maintain world-writable sticky bit permissions (`0o1777`) across both host layer unpacking and guest PID 1 initialization, completely eliminating unprivileged permission traps (`_apt`, `postgres`, `nginx`).
+
+---
+
+### 6. Multi-Format Block Storage (RAW, QCOW2, VMDK) & VirtioFS DAX
+
+Powered by `libkrun v2` extensions, `cro` provides native enterprise block device virtualization and high-throughput shared memory windows:
+
+```bash
+# 💽 Attach high-capacity QCOW2 or VMDK virtual disks with macOS relaxed sync:
+cro run \
+    --disk ./database.qcow2 \
+    --disk backup:./backup.vmdk:ro \
+    --dax 4G \
+    ubuntu:24.04
+
+# ⚡ Instant on-demand container streaming with Dragonfly Nydus RAFSv6:
+cro run \
+    --lazy-load \
+    --nydus-bootstrap /var/lib/nydus/bootstrap.rafs \
+    --nydus-cache /var/cache/nydus \
+    alpine:latest
+```
+
+- **Universal Multi-Format Block Devices**: Full native support for raw disk images, QCOW2 (QEMU Copy-on-Write v2/v3), and VMDK (VMware Virtual Machine Disk). `cro` automatically identifies the format by file extension and magic headers.
+- **macOS Relaxed Disk Syncing (`F_BARRIERFSYNC`)**: Default block device mode utilizes relaxed barrier syncing (`DiskSyncMode::Relaxed`) on Apple Silicon APFS to avoid disk flush bottlenecks while preserving metadata consistency.
+- **Orderly ACPI/GPIO EventFd Shutdown**: Clean eventfd-based poweroff interrupts allow guest kernels to gracefully sync file systems and unmount before hypervisor termination.
+- **VirtioFS DAX Zero-Copy Window**: Direct access memory mapping (`--dax <size>`) maps LLM weights (GGUF, Safetensors) directly into the guest address space with zero memory duplication.
+- **In-Memory File Overlays**: Seamless zero-disk injection of system configuration files (`/etc/hosts`, `/etc/resolv.conf`, network credentials) via `one_shot` virtual entries.
 
 ---
 
@@ -491,15 +585,42 @@ Manage, inspect, and diagnose microVM networks with dedicated native commands:
 ```bash
 # List all active microVM networks, modes, IPs, and port mappings:
 cro network ls
+cro network ls --json
 
 # Detailed deep-dive into a microVM's network stack & security rules:
 cro network inspect <vm-id>
 
 # Tabulate active published host-to-guest ports with direct local endpoints:
 cro network ports
+cro network ports <vm-id>
 
 # Run live in-guest network connectivity, DNS resolution, and egress diagnostic probes:
 cro network test <vm-id> api.openai.com
+cro network test <vm-id> 1.1.1.1
+
+# Run comprehensive system-wide network diagnostics and firewall verification:
+cro network doctor
+```
+
+#### Example Output: `cro network doctor`
+```text
+🩺 MicroVM Network & Security Doctor
+------------------------------------------------------------
+  Autonomous Resilient DNS:      ✅ Ready (1.1.1.1, 8.8.8.8)
+  Zero-Trust Egress Firewall:    ✅ Active (Host, Wildcard, CIDR Supported)
+  Multi-Cloud Metadata Defense:  ✅ Strict Default-Deny (AWS/GCP/Azure/Alibaba/IPv6)
+  In-Flight Secret Substitution: ✅ Active (Header, URI, Body & URL-Encoded)
+  Multi-Provider Token Metering: ✅ Active (OpenAI, Anthropic, Gemini, Ollama)
+  Cloudflare Pingora L7 Gateway: ✅ Ready
+
+  Local Port Availability:
+    Port 8080  : 🟢 Available
+    Port 9090  : 🟢 Available
+    Port 3000  : 🟢 Available
+    Port 5432  : 🟢 Available
+    Port 6379  : 🟢 Available
+------------------------------------------------------------
+✅ All core microVM networking subsystems operational.
 ```
 
 #### Example Output: `cro network inspect`
@@ -540,9 +661,19 @@ cro run \
 ```
 
 1. **Default-Deny Egress**: All outbound connections outside the `--allow-host` whitelist are immediately dropped.
-2. **Cloud Metadata Defense**: Access to AWS/GCP/Azure instance metadata (`169.254.169.254`) is strictly blocked by default.
+2. **Cloud Metadata Defense**: Access to AWS/GCP/Azure/Alibaba instance metadata (`169.254.169.254`, `metadata.google.internal`, `100.100.100.200`, `fd00:ec2::254`) is strictly blocked by default.
 3. **In-Flight Secret Substitution**: The microVM only receives an opaque placeholder token (`krun-secret:OPENAI_API_KEY`). The host egress proxy transparently replaces it on the wire with the real secret, so untrusted code can **never read the actual API key from disk or memory**.
 4. **Hard LLM Token Budget**: Outbound SSE streams and JSON payloads are inspected in real time. Connections are terminated the instant the cumulative token threshold is exceeded.
+
+```bash
+# Launch a standalone Zero-Trust Ephemeral Egress Proxy:
+cro network proxy \
+    --listen 127.0.0.1:8080 \
+    --allow-host api.openai.com:443 \
+    --allow-host "*.github.com:443" \
+    --secret OPENAI_API_KEY=env:HOST_KEY \
+    --max-tokens 50000
+```
 
 ---
 
@@ -636,7 +767,7 @@ IO.inspect(report.telemetry)
 PORT=4005 mix run --no-halt
 
 # Endpoints:
-# • GET  /unstructured              - Interactive Cyber-Obsidian Web UI
+# • GET  /unstructured              - Interactive Cyber-Obsidian Web UI & HITL Approvals
 # • GET  /api/unstructured/health   - Engine health & telemetry metadata
 # • POST /api/unstructured/partition- Partition document into JSON elements
 # • POST /api/unstructured/scan     - Detect AI threats and return risk score
@@ -742,6 +873,15 @@ cro run -v /Users/apple/data:data alpine:latest -- ls -la /data
 # Forward ports (host:guest):
 cro run -p 8080:80 nginx:alpine
 
+# Attach block disk image (auto format detection: RAW, QCOW2, VMDK):
+cro run --disk ./database.qcow2 --disk backup:./backup.vmdk:ro alpine:latest
+
+# Direct memory-mapped VirtioFS DAX window for zero-copy file sharing:
+cro run --dax 4G alpine:latest
+
+# On-demand lazy-loading with Dragonfly Nydus RAFSv6:
+cro run --lazy-load alpine:latest
+
 # Stream microVM console logs:
 cro logs -f <vm-id>
 
@@ -780,6 +920,19 @@ cro rm -f <vm-id>
 cro prune
 ```
 
+### Human-in-the-Loop (HITL) Approvals (OneCLI)
+```bash
+# List all suspended mutating agent requests:
+cro approval list
+cro approval ls --all --json
+
+# Inspect and approve an intercepted request:
+cro approval approve appr-89a1c
+
+# Deny an intercepted request with reason:
+cro approval deny appr-89a1c --reason "Potentially destructive database drop"
+```
+
 ### Universal Multi-Boot Engines (Linux, Asahi, m1n1, UEFI & Unikernels)
 ```bash
 # Direct compressed Asahi Linux ARM64 kernel boot (auto-detect or explicit format):
@@ -815,8 +968,31 @@ cro network ports <vm-id>
 cro network test <vm-id> api.openai.com
 cro network test <vm-id> 1.1.1.1
 
+# Run comprehensive system-wide network diagnostics and firewall verification:
+cro network doctor
+
+# Start a standalone Zero-Trust Ephemeral Egress Proxy:
+cro network proxy --listen 127.0.0.1:8080 --allow-host api.openai.com:443
+
 # Launch microVM with custom network mode, MAC address, and jumbo frames:
 cro run --net gvproxy --mac 5a:94:ef:e4:0c:ee --mtu 9000 alpine:latest
+```
+
+### Multi-MicroVM Compose & Kubernetes
+```bash
+# Compose lifecycle operations:
+cro compose up -d
+cro compose ps
+cro compose logs -f
+cro compose config
+cro compose stop
+cro compose start
+cro compose restart
+cro compose down -v
+
+# Kubernetes Pod parity:
+cro kube play pod.yaml -d
+cro kube down pod.yaml
 ```
 
 </details>
@@ -825,7 +1001,7 @@ cro run --net gvproxy --mac 5a:94:ef:e4:0c:ee --mtu 9000 alpine:latest
 
 ## 💻 Multi-Language Client SDKs
 
-`cro` provides first-class client SDKs across **Python**, **TypeScript/Node**, **Rust**, and **Go**:
+`cro` provides first-class client SDKs across **Python**, **TypeScript/Node**, **Rust**, **Go**, and **Elixir**:
 
 <details>
 <summary><b>🐍 Python SDK (Serverless <code>@task</code> decorator)</b></summary>
@@ -927,6 +1103,21 @@ func main() {
 ```
 </details>
 
+<details>
+<summary><b>💧 Elixir SDK (<code>Krun.Unstructured</code>)</b></summary>
+
+```elixir
+# Ingest, scan for AI threats, and execute hardware microVM detonation:
+{:ok, scan} = Krun.scan_threats(untrusted_payload, filename: "invoice.pdf")
+if scan.is_threat do
+  IO.puts("Quarantined threat with risk score: #{scan.risk_score}")
+else
+  {:ok, elements} = Krun.partition(scan.sanitized_text, filename: "invoice.pdf")
+  IO.inspect(elements)
+end
+```
+</details>
+
 ---
 
 ## ☸️ Kubernetes & containerd Integration
@@ -967,12 +1158,17 @@ EOF
 | **`build`** | `cro build -t <tag> [-f <Dockerfile>] [context]` | Build an OCI image from a Dockerfile using the native in-process engine (no daemon) |
 | **`kube play`** | `cro kube play <pod.yaml> [-d]` | Play/launch all containers defined in a Kubernetes `v1/Pod` YAML manifest |
 | **`kube down`** | `cro kube down <pod.yaml>` | Stop and tear down all containers in a Kubernetes Pod manifest |
-| **`compose up`** | `cro compose up -f <compose.yaml> [-d]` | Orchestrate multi-service microVM stacks with dependency ordering |
-| **`compose ps`** | `cro compose ps -f <compose.yaml>` | List status and ports of running compose services |
-| **`compose logs`** | `cro compose logs -f` | Stream unified, aggregated logs across all microVM services |
-| **`compose down`** | `cro compose down -f <compose.yaml>` | Gracefully stop and clean up all compose microVM instances |
+| **`compose up`** | `cro compose up [-f <compose.yaml>] [-d] [SVC...]` | Orchestrate multi-service microVM stacks with dependency ordering |
+| **`compose ps`** | `cro compose ps [-f <compose.yaml>]` | List status and ports of running compose services |
+| **`compose logs`** | `cro compose logs [-f] [SVC]` | Stream unified, aggregated logs across all microVM services |
+| **`compose stop`** | `cro compose stop [-f <compose.yaml>] [SVC...]` | Stop running services without removing containers |
+| **`compose start`**| `cro compose start [-f <compose.yaml>] [SVC...]`| Start previously stopped compose microVM services |
+| **`compose restart`**| `cro compose restart [-f <compose.yaml>] [SVC...]`| Restart running microVM compose services |
+| **`compose config`**| `cro compose config [-f <compose.yaml>]` | Validate and view resolved compose configuration |
+| **`compose down`** | `cro compose down [-f <compose.yaml>] [-v]` | Gracefully stop and clean up all compose microVM instances & volumes |
 | **`apply`** | `cro apply -f <manifest.yaml> [-d]` | Apply any YAML manifest (Compose, Kubernetes MicroVm CRD, or Pod) |
-| **`sandbox`** | `cro sandbox <agent> -w <dir> [--cherry-pick <sha>]` | Launch an AI coding agent (Claude, Gemini, Dev) with CoW workspace & secret masking |
+| **`sandbox`** | `cro sandbox [OPTIONS] [--hitl] [--secret <K=V>]...` | Launch an AI coding agent with CoW workspace, HITL wire-hold, and vault secrets |
+| **`approval`**| `cro approval <list\|approve\|deny> [ID]` | Inspect, approve, or deny in-flight mutating agent requests held at Pingora gateway |
 | **`cherry-pick`**| `cro cherry-pick <vm-id> -w <host-dir>` | Cherry-pick commits made in an isolated sandbox back to host git repository |
 | **`exec`** | `cro exec [OPTIONS] <ID> <CMD>...` | Execute interactive or batch commands inside a live microVM via vsock |
 | **`ps`** | `cro ps [-a]` | List running, paused, and recent microVM instances |
@@ -990,13 +1186,18 @@ EOF
 | **`resize`** | `cro resize <ID> -c <cpus> -m <mb>` | Dynamically hot-plug CPU and memory resources of a live microVM |
 | **`network ls`** | `cro network ls` | List active microVM network configurations, interfaces, and IPs |
 | **`network inspect`**| `cro network inspect <ID>` | Inspect virtual network topology, DNS, egress rules, and proxy servers |
+| **`network ports`**| `cro network ports [<ID>]` | List published host-to-guest port forwards with endpoint mapping |
+| **`network test`** | `cro network test <ID> <target>` | Test network connectivity and DNS resolution from inside a microVM |
+| **`network doctor`**| `cro network doctor [--json]` | Diagnose host network environment, DNS health, and egress defense |
+| **`network proxy`** | `cro network proxy [--listen <addr>]` | Launch standalone zero-trust egress proxy with secret masking & metering |
 | **`network pingora`**| `cro network pingora --listen <addr>` | Start a Cloudflare Pingora L7 gateway or zero-trust egress proxy |
 | **`metrics`** | `cro metrics [--listen <addr>]` | Export Prometheus metrics or serve live Prometheus scrape endpoint |
 | **`artifact`** | `cro artifact pull / list` | Manage detached OCI artifacts (LLM weights, datasets, toolchains) |
-| **`containerd`**| `cro containerd install` | Install containerd v2 runtime shim (`containerd-shim-krun-v2`) |
+| **`containerd`**| `cro containerd install / status` | Manage containerd v2 runtime shim (`containerd-shim-krun-v2`) |
 | **`preflight`** | `cro preflight` | Run hypervisor preflight checks (macOS Hypervisor.framework / Linux KVM) |
 | **`info`** | `cro info` | Display host hypervisor capabilities, cache size, and system state |
 | **`prune`** | `cro prune` | Clean up stopped microVM instances and dangling cache directories |
+| **`unikernel`** | `cro unikernel <ELF> [-c <cpus>] [-m <mb>]` | Boot unikernels (Unikraft, Nanos, OSv, Solo5) directly in microVM |
 
 ---
 
@@ -1013,8 +1214,16 @@ make build
 # Sign binaries with macOS Hypervisor entitlement:
 make sign
 
-# Run all 134 automated unit and integration tests:
+# Run all 184+ automated unit and integration tests:
 make test
+
+# Type-check, lint, and formatting verification:
+make check
+make clippy
+make fmt
+
+# Install binaries to /usr/local/bin (cro, microvm, runner, shim, operator):
+make install
 ```
 
 ---
