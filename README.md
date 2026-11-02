@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)%20%7C%20Linux%20(KVM)-black.svg?style=for-the-badge&logo=apple)](https://github.com/CroSandbox/cro)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-230%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
+[![Tests](https://img.shields.io/badge/tests-238%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
 [![Cold Boot](https://img.shields.io/badge/boot_time-%3C100ms-success.svg?style=for-the-badge&logo=lightning)](https://github.com/CroSandbox/cro)
 [![Compose](https://img.shields.io/badge/orchestration-Docker%20Compose%20%7C%20K8s%20CRD-purple.svg?style=for-the-badge&logo=docker)](examples/krun-compose.yaml)
 
@@ -123,6 +123,23 @@ cro model pull ghcr.io/org/llama-3.2-1b:latest
 
 # Run an inference container with zero-copy VirtioFS DAX shared memory mapping:
 cro run --model ghcr.io/org/llama-3.2-1b:latest:/models/llm alpine:latest -- ls -lh /models/llm
+```
+
+### 9. Serve Models with Smart Auto-Dispatch & OpenAI API (`cro serve` / `cro vllm`)
+```bash
+# Serve any cached ModelPack, local model directory, or GGUF/Safetensors file:
+cro serve llama-3.2-1b -d
+
+# Send an OpenAI-compatible chat completion request:
+curl http://127.0.0.1:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "llama-3.2-1b",
+        "messages": [{"role": "user", "content": "Explain microVM VirtioFS DAX in one sentence."}]
+    }'
+
+# Or launch with strict vLLM engine, 16 GB RAM, and 8 vCPUs:
+cro vllm serve mistralai/Mistral-7B-v0.1 --engine vllm -m 16384 -c 8
 ```
 
 ---
@@ -600,6 +617,101 @@ cro run --model ghcr.io/meta-llama/llama-3.2-1b-instruct:latest:/models/llm \
     --gpu \
     ghcr.io/ggerganov/llama.cpp:server \
     -- -m /models/llm/llama-3.2-1b.Q4_K_M.gguf --port 8080
+```
+
+---
+
+## ⚡ Multi-Engine Model Serving Subsystem (`cro serve` & `cro vllm`)
+
+`cro` provides a premier model serving subsystem that transforms any CNCF ModelPack, Hugging Face checkpoint, or local directory into a production-grade, hardware-isolated OpenAI-compatible inference endpoint (`/v1/chat/completions`, `/v1/models`).
+
+```mermaid
+graph TD
+    subgraph "Model Source"
+        MP["📦 CNCF ModelPack (OCI Artifact)"]
+        GGUF["📄 GGUF Weights (.gguf)"]
+        SAFE["📑 Safetensors / PyTorch / ONNX"]
+        UZU_MOD["⚡ Uzu Metal Model (.uzu)"]
+    end
+
+    subgraph "Smart Engine Auto-Dispatch"
+        DISPATCH{"Engine Dispatcher"}
+        MP --> DISPATCH
+        GGUF --> DISPATCH
+        SAFE --> DISPATCH
+        UZU_MOD --> DISPATCH
+        
+        LLAMA["🦙 llama.cpp:server<br/>(ghcr.io/ggerganov/llama.cpp:server)"]
+        VLLM["🚀 vLLM OpenAI Server<br/>(vllm/vllm-openai:latest)"]
+        UZU["⚡ Uzu Server<br/>(trymirai/uzu:latest)"]
+        
+        DISPATCH -->|"Format: Gguf"| LLAMA
+        DISPATCH -->|"Format: Safetensors / PyTorch"| VLLM
+        DISPATCH -->|"Format: Uzu"| UZU
+    end
+
+    subgraph "MicroVM Hypervisor Isolation"
+        DAX["⚡ VirtioFS DAX (Direct Access Window)<br/>Zero-Copy Host-to-Guest mmap"]
+        GPU["🎮 Virtio-GPU (Apple Silicon Metal / DRM Venus)"]
+        UVM["🛡️ Hardware MicroVM (8GB+ RAM, 4+ vCPUs)"]
+        
+        LLAMA --> UVM
+        VLLM --> UVM
+        UZU --> UVM
+        DAX --> UVM
+        GPU --> UVM
+    end
+
+    subgraph "Clients & API Consumption"
+        EP["🌐 OpenAI API Gateway: http://127.0.0.1:8000/v1"]
+        UVM --> EP
+        CURL["cURL / HTTP Client"] --> EP
+        SDK["OpenAI / LangChain / LlamaIndex SDK"] --> EP
+        GATEWAY["🛡️ Cloudflare Pingora Token Gateway"] --> EP
+    end
+```
+
+### Key Capabilities
+
+1. **Smart Engine Auto-Dispatch vs. Strict Selection**:
+   - **`Auto` (Default)**: Automatically detects model format and architecture. Safetensors/PyTorch/MLX checkpoints dispatch to `vLLM` with PagedAttention and continuous batching; GGUF models dispatch to `llama.cpp` using Metal GPU acceleration; `.uzu` models dispatch to `uzu`.
+   - **Strict Selection**: Override at any time with `--engine vllm`, `--engine llamacpp`, or `--engine uzu`. Custom images can be supplied via `--engine-image <image>`.
+
+2. **VirtioFS DAX Zero-Copy Weight Injection**:
+   Model weights are never copied or double-buffered. A dedicated DAX window is automatically calculated and provisioned into the guest's physical address space, allowing instant model loading without guest memory pressure.
+
+3. **Production Lifecycles & Live Health Probing**:
+   `cro serve` actively polls `/health` and `/v1/models` using exponential backoff up to 120s before returning. When ready, it renders a terminal summary card with active endpoints and ready-to-run `curl` commands.
+
+4. **Multi-Service Declarative Compose & Token Governance**:
+   Deploy full-stack inference pipelines pairing `vLLM` backends with a Cloudflare Pingora reverse proxy enforcing zero-trust egress and strict token ceilings (`examples/vllm-compose.yaml`).
+
+### Usage Examples
+
+```bash
+# 1. Zero-config serve (auto-detects format, auto-provisions DAX & GPU):
+cro serve llama-3.2-1b
+
+# 2. Run in background (detached) and wait for readiness probe:
+cro serve llama-3.2-1b -d --wait
+
+# 3. Query the endpoint using standard OpenAI schema:
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-3.2-1b",
+    "messages": [{"role": "user", "content": "What are the advantages of microVM isolation?"}]
+  }'
+
+# 4. First-class alias `cro vllm` with custom context length and tensor parallelism:
+cro vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --max-model-len 8192 \
+  --memory 16384 \
+  --cpus 8 \
+  --port 8000
+
+# 5. Declarative multi-service deployment with Compose & Pingora token gateway:
+cro compose up -f examples/vllm-compose.yaml -d
 ```
 
 ---
@@ -1288,6 +1400,8 @@ EOF
 | **`metrics`** | `cro metrics [--listen <addr>]` | Export Prometheus metrics or serve live Prometheus scrape endpoint |
 | **`artifact`** | `cro artifact pull / list` | Manage detached OCI artifacts (LLM weights, datasets, toolchains) |
 | **`model`** | `cro model pull / list / info / pack` | Manage AI/ML models conforming to CNCF ModelPack Spec with zero-copy DAX |
+| **`serve`** | `cro serve <model> [-e auto|vllm|llamacpp|uzu] [-p <port>] [-d]` | Serve AI models via OpenAI-compatible API with smart auto-dispatch and zero-copy DAX |
+| **`vllm`** | `cro vllm serve <model> [options]` | Dedicated CLI alias for model serving with vLLM, llama.cpp, or uzu engines |
 | **`containerd`**| `cro containerd install / status` | Manage containerd v2 runtime shim (`containerd-shim-krun-v2`) |
 | **`preflight`** | `cro preflight` | Run hypervisor preflight checks (macOS Hypervisor.framework / Linux KVM) |
 | **`info`** | `cro info` | Display host hypervisor capabilities, cache size, and system state |
@@ -1309,7 +1423,7 @@ make build
 # Sign binaries with macOS Hypervisor entitlement:
 make sign
 
-# Run all 188+ automated unit and integration tests:
+# Run all 238+ automated unit and integration tests:
 make test
 
 # Type-check, lint, and formatting verification:

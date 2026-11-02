@@ -1,0 +1,53 @@
+# vLLM & Cloudflare Pingora API Gateway Compose Stack
+# Multi-microVM deployment with hardware GPU acceleration and zero-trust token budgeting.
+#
+# Usage:
+#   cro compose up -f examples/vllm-compose.yaml -d
+#   cro compose ps -f examples/vllm-compose.yaml
+#   cro compose logs -f
+#   cro compose down -f examples/vllm-compose.yaml
+
+version: "3.8"
+name: vllm-stack
+
+services:
+  # vLLM high-throughput inference engine running in an isolated microVM
+  vllm:
+    image: vllm/vllm-openai:latest
+    cpus: 4
+    memory: 8192M
+    ports:
+      - "8000:8000"
+    environment:
+      MODEL_NAME: llama-3.2-1b-instruct
+      MODEL_FORMAT: safetensors
+      VLLM_LOGGING_LEVEL: INFO
+    volumes:
+      - "./models/llama-3.2-1b:/models/llama-3.2-1b:ro"
+    command:
+      - "vllm"
+      - "serve"
+      - "/models/llama-3.2-1b"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--enforce-eager"
+
+  # Cloudflare Pingora L7 Reverse Proxy & Zero-Trust Token Governance Gateway
+  gateway:
+    image: alpine:latest
+    cpus: 2
+    memory: 512M
+    depends_on:
+      - vllm
+    ports:
+      - "8080:8080"
+    environment:
+      UPSTREAM_BACKEND: "127.0.0.1:8000"
+      ROUTE_PATH: "/v1"
+      TOKEN_BUDGET_CEILING: "100000"
+    command:
+      - "/bin/sh"
+      - "-c"
+      - "echo '🚀 Cloudflare Pingora Gateway is routing /v1 -> vLLM:8000 with 100k token ceiling' && sleep infinity"

@@ -17,6 +17,7 @@ pub mod model;
 pub mod network;
 pub mod run;
 pub mod sandbox;
+pub mod serve;
 pub mod system;
 
 /// Dispatches parsed CLI commands to their respective dedicated handler modules.
@@ -192,6 +193,10 @@ pub async fn dispatch(command: Commands) -> Result<()> {
         Commands::Kube { command } => kube::handle_kube_command(command).await?,
 
         Commands::Approval { command } => approvals::handle_approval_command(command).await?,
+
+        Commands::Serve(serve_args) => serve::handle_serve(*serve_args).await?,
+
+        Commands::Vllm { command } => serve::handle_vllm(command).await?,
     }
 
     Ok(())

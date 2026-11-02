@@ -148,6 +148,77 @@ fn test_cli_parse_run_with_model() {
 }
 
 #[test]
+fn test_cli_parse_serve_and_vllm() {
+    // 1. cro serve with defaults
+    let serve_args = vec!["cro", "serve", "ghcr.io/org/llama-3.2-1b:latest"];
+    let cli = Cli::try_parse_from(serve_args).unwrap();
+    match cli.command {
+        Commands::Serve(args) => {
+            assert_eq!(args.model, "ghcr.io/org/llama-3.2-1b:latest");
+            assert_eq!(args.engine, "auto");
+            assert_eq!(args.port, 8000);
+            assert_eq!(args.cpus, 4);
+            assert_eq!(args.memory, 8192);
+            assert!(args.gpu);
+            assert!(args.wait);
+        }
+        _ => panic!("Expected Commands::Serve"),
+    }
+
+    // 2. cro serve with explicit vllm flags
+    let custom_serve = vec![
+        "cro",
+        "serve",
+        "./models/mistral",
+        "--engine",
+        "vllm",
+        "-p",
+        "8080",
+        "-c",
+        "8",
+        "-m",
+        "16384",
+        "--api-key",
+        "mock-key",
+        "--max-model-len",
+        "8192",
+        "--tensor-parallel-size",
+        "2",
+        "--enforce-eager",
+        "-d",
+    ];
+    let cli2 = Cli::try_parse_from(custom_serve).unwrap();
+    match cli2.command {
+        Commands::Serve(args) => {
+            assert_eq!(args.model, "./models/mistral");
+            assert_eq!(args.engine, "vllm");
+            assert_eq!(args.port, 8080);
+            assert_eq!(args.cpus, 8);
+            assert_eq!(args.memory, 16384);
+            assert_eq!(args.api_key.as_deref(), Some("mock-key"));
+            assert_eq!(args.max_model_len, Some(8192));
+            assert_eq!(args.tensor_parallel_size, 2);
+            assert!(args.enforce_eager);
+            assert!(args.detach);
+        }
+        _ => panic!("Expected Commands::Serve"),
+    }
+
+    // 3. cro vllm serve subcommand
+    let vllm_args = vec!["cro", "vllm", "serve", "my-model", "-p", "9000"];
+    let cli3 = Cli::try_parse_from(vllm_args).unwrap();
+    match cli3.command {
+        Commands::Vllm {
+            command: VllmCommands::Serve(sargs),
+        } => {
+            assert_eq!(sargs.model, "my-model");
+            assert_eq!(sargs.port, 9000);
+        }
+        _ => panic!("Expected Commands::Vllm"),
+    }
+}
+
+#[test]
 fn test_cli_parse_egress_and_secrets() {
     let args = vec![
         "microvm",

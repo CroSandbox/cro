@@ -1,0 +1,47 @@
+// Copyright 2026, libkrun-sdk authors.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Subcommand handlers for model inference serving (`cro serve` and `cro vllm`).
+
+use crate::args::{ServeArgs, VllmCommands};
+use anyhow::Result;
+use microvm_core::{parse_size_to_bytes, ServeConfig, ServeManager};
+
+pub async fn handle_serve(args: ServeArgs) -> Result<()> {
+    let mut config = ServeConfig::new(args.model);
+    config.engine = args
+        .engine
+        .parse()
+        .map_err(|e: String| anyhow::anyhow!("{}", e))?;
+    config.host_port = args.port;
+    config.host = args.host;
+    config.container_image = args.image;
+    config.cpus = args.cpus;
+    config.memory_mb = args.memory;
+    config.gpu = args.gpu;
+    config.gpu_shm_size = args.gpu_shm_size;
+    config.dax_window_size = args.dax.map(|s| parse_size_to_bytes(&s)).transpose()?;
+    config.max_model_len = args.max_model_len;
+    config.tensor_parallel_size = args.tensor_parallel_size;
+    config.enforce_eager = args.enforce_eager;
+    config.api_key = args.api_key;
+    config.data_dir = args.data_dir;
+    config.extra_args = args.extra_args;
+
+    let handle = ServeManager::start(&config, args.detach, args.wait).await?;
+
+    if !args.detach {
+        handle.wait().await?;
+    }
+
+    Ok(())
+}
+
+pub async fn handle_vllm(command: VllmCommands) -> Result<()> {
+    match command {
+        VllmCommands::Serve(mut args) => {
+            args.engine = "vllm".to_string();
+            handle_serve(*args).await
+        }
+    }
+}

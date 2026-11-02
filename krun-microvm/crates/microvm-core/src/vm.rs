@@ -250,12 +250,20 @@ impl MicroVmBuilder {
         self
     }
 
+    pub fn get_image(&self) -> &str {
+        &self.image
+    }
+
     pub fn get_vcpus(&self) -> u8 {
         self.vcpus
     }
 
     pub fn get_ram_mib(&self) -> u32 {
         self.ram_mib
+    }
+
+    pub fn get_port_forwards(&self) -> &[PortForward] {
+        &self.port_forwards
     }
 
     pub fn get_file_mounts(&self) -> &[(PathBuf, PathBuf)] {

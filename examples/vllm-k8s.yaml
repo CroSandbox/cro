@@ -1,0 +1,47 @@
+# Kubernetes Pod Manifest for Hardware-Isolated vLLM Serving
+# Uses containerd-shim-krun-v2 with runtimeClassName: krun.
+#
+# Usage:
+#   cro kube play examples/vllm-k8s.yaml -d
+#   cro kube down examples/vllm-k8s.yaml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-server
+  labels:
+    app: vllm
+    tier: inference
+spec:
+  runtimeClassName: krun
+  containers:
+    - name: vllm
+      image: vllm/vllm-openai:latest
+      resources:
+        limits:
+          cpu: "4"
+          memory: "8192Mi"
+      ports:
+        - containerPort: 8000
+          name: http
+      env:
+        - name: MODEL_NAME
+          value: llama-3.2-1b-instruct
+        - name: MODEL_FORMAT
+          value: safetensors
+      volumeMounts:
+        - name: model-weights
+          mountPath: /models/llama-3.2-1b
+          readOnly: true
+      command:
+        - "vllm"
+        - "serve"
+        - "/models/llama-3.2-1b"
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "8000"
+  volumes:
+    - name: model-weights
+      hostPath:
+        path: /var/cache/krun-microvm/models/llama-3.2-1b

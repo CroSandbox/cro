@@ -473,6 +473,11 @@ impl ModelEngine {
                         *inferred_format = Some(ModelFormat::PyTorch);
                     }
                     ModelFileRole::Weight
+                } else if lower.ends_with(".uzu") {
+                    if inferred_format.is_none() {
+                        *inferred_format = Some(ModelFormat::Other("uzu".to_string()));
+                    }
+                    ModelFileRole::Weight
                 } else if lower.contains("tokenizer") || lower.contains("vocab") {
                     ModelFileRole::Tokenizer
                 } else if lower.ends_with(".json") || lower.contains("config") {

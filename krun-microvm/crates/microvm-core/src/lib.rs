@@ -14,6 +14,7 @@ pub mod preflight;
 pub mod protocol;
 pub mod rootfs;
 pub mod secrets;
+pub mod serve;
 pub mod state;
 pub mod tty;
 pub mod types;
@@ -50,6 +51,7 @@ pub use preflight::{CheckResult, Preflight};
 pub use protocol::{ControlMessage, MessagePayload, CURRENT_PROTOCOL_VERSION};
 pub use rootfs::clone_rootfs;
 pub use secrets::{CredentialScope, ScopeAuthorizer, VaultResolver};
+pub use serve::{ServeConfig, ServeEngine, ServeHandle, ServeManager};
 pub use state::{SnapshotManifest, StateManager, VmState, VmStatus};
 pub use tty::RawModeGuard;
 pub use types::{

@@ -525,6 +525,15 @@ pub enum Commands {
         command: ModelCommands,
     },
 
+    /// Serve an AI model using a high-throughput inference engine in an isolated microVM
+    Serve(Box<ServeArgs>),
+
+    /// Manage and run vLLM inference microVMs (alias to cro serve --engine vllm)
+    Vllm {
+        #[command(subcommand)]
+        command: VllmCommands,
+    },
+
     /// Capture an instant Copy-on-Write snapshot of a microVM
     Snapshot {
         /// ID or PID of the microVM
@@ -1085,4 +1094,84 @@ pub enum ContainerdCommands {
 
     /// Check containerd daemon status and shim binary availability
     Status,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ServeArgs {
+    /// Model reference (OCI ModelPack or local directory)
+    pub model: String,
+
+    /// Inference engine (auto, vllm, llamacpp, uzu; default: auto)
+    #[arg(long, default_value = "auto")]
+    pub engine: String,
+
+    /// Host port to expose the OpenAI-compatible API on (default: 8000)
+    #[arg(short = 'p', long, default_value_t = 8000)]
+    pub port: u16,
+
+    /// Host interface to bind the API to (default: 127.0.0.1)
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
+    /// Base container image for the inference engine
+    #[arg(long)]
+    pub image: Option<String>,
+
+    /// Number of virtual CPUs (default: 4)
+    #[arg(short = 'c', long, default_value_t = 4)]
+    pub cpus: u8,
+
+    /// Guest RAM in MiB (default: 8192 MiB / 8 GB)
+    #[arg(short = 'm', long, default_value_t = 8192)]
+    pub memory: u32,
+
+    /// Enable hardware GPU acceleration (Apple Silicon Metal / Linux DRM Venus)
+    #[arg(long, default_value_t = true)]
+    pub gpu: bool,
+
+    /// Shared memory vRAM window size for GPU (e.g. 4G, 8G)
+    #[arg(long, default_value = "4G")]
+    pub gpu_shm_size: String,
+
+    /// VirtioFS DAX window size (e.g. 4G; auto-calculated from model size by default)
+    #[arg(long)]
+    pub dax: Option<String>,
+
+    /// Maximum model context length (tokens)
+    #[arg(long)]
+    pub max_model_len: Option<u64>,
+
+    /// Number of tensor parallel ranks
+    #[arg(long, default_value_t = 1)]
+    pub tensor_parallel_size: u32,
+
+    /// Enforce eager execution mode in vLLM (disables CUDA/Metal graph capture)
+    #[arg(long)]
+    pub enforce_eager: bool,
+
+    /// API key requirement for the exposed OpenAI endpoints
+    #[arg(long)]
+    pub api_key: Option<String>,
+
+    /// Run the inference server in the background (detached mode)
+    #[arg(short = 'd', long)]
+    pub detach: bool,
+
+    /// Wait for server /health probe to become ready before exiting in detached mode
+    #[arg(long, default_value_t = true)]
+    pub wait: bool,
+
+    /// Custom data cache directory
+    #[arg(long)]
+    pub data_dir: Option<PathBuf>,
+
+    /// Additional trailing arguments passed directly to the inference server
+    #[arg(last = true)]
+    pub extra_args: Vec<String>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum VllmCommands {
+    /// Serve a ModelPack using the vLLM engine
+    Serve(Box<ServeArgs>),
 }
