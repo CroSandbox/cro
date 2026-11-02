@@ -1112,6 +1112,31 @@ impl MicroVmBuilder {
             let _ = fs::create_dir_all(instance_rootfs.join(&m.tag));
         }
 
+        // Inject in-guest virtiofs mount commands into krun-init.sh before exec "$@"
+        let script_path = instance_rootfs.join("krun-init.sh");
+        if script_path.exists() {
+            if let Ok(content) = fs::read_to_string(&script_path) {
+                let mut mount_cmds = Vec::new();
+                for m in &final_virtiofs_mounts {
+                    let ro_flag = if m.read_only { "-o ro " } else { "" };
+                    mount_cmds.push(format!("mkdir -p /{} 2>/dev/null || true", m.tag));
+                    mount_cmds.push(format!(
+                        "mount -t virtiofs {ro_flag}{} /{} 2>/dev/null || true",
+                        m.tag, m.tag
+                    ));
+                }
+                if !mount_cmds.is_empty() {
+                    let mount_block = mount_cmds.join("\n");
+                    let updated = if content.contains("exec \"$@\"") {
+                        content.replace("exec \"$@\"", &format!("{}\nexec \"$@\"", mount_block))
+                    } else {
+                        format!("{}\n{}", content, mount_block)
+                    };
+                    let _ = fs::write(&script_path, updated);
+                }
+            }
+        }
+
         Ok(final_virtiofs_mounts)
     }
 

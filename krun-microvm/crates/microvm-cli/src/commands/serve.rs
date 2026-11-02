@@ -28,7 +28,8 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     config.data_dir = args.data_dir;
     config.extra_args = args.extra_args;
 
-    let handle = ServeManager::start(&config, args.detach, args.wait).await?;
+    let wait = !args.no_wait && args.wait;
+    let handle = ServeManager::start(&config, args.detach, wait).await?;
 
     if !args.detach {
         handle.wait().await?;

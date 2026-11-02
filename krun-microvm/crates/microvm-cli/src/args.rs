@@ -1158,8 +1158,12 @@ pub struct ServeArgs {
     pub detach: bool,
 
     /// Wait for server /health probe to become ready before exiting in detached mode
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub wait: bool,
+
+    /// Do not wait for server /health probe before exiting in detached mode
+    #[arg(long)]
+    pub no_wait: bool,
 
     /// Custom data cache directory
     #[arg(long)]

@@ -45,10 +45,10 @@ async fn test_serve_auto_dispatch_gguf_to_llamacpp() {
     assert_eq!(resolved_engine, ServeEngine::LlamaCpp);
 
     let image = serve_cfg.resolve_image(resolved_engine);
-    assert_eq!(image, "ghcr.io/ggerganov/llama.cpp:server");
+    assert_eq!(image, "ghcr.io/ggml-org/llama.cpp:server");
 
     let cmd = serve_cfg.build_container_cmd(resolved_engine, &meta);
-    assert_eq!(cmd[0], "/server");
+    assert_eq!(cmd[0], "/app/llama-server");
     assert_eq!(cmd[1], "-m");
     assert!(cmd[2].ends_with(".gguf"));
     assert!(cmd.contains(&"--host".to_string()));

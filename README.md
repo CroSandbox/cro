@@ -615,7 +615,7 @@ cro model list
 # Run inference inside an isolated microVM with auto-DAX memory mapping:
 cro run --model ghcr.io/meta-llama/llama-3.2-1b-instruct:latest:/models/llm \
     --gpu \
-    ghcr.io/ggerganov/llama.cpp:server \
+    ghcr.io/ggml-org/llama.cpp:server \
     -- -m /models/llm/llama-3.2-1b.Q4_K_M.gguf --port 8080
 ```
 
@@ -641,7 +641,7 @@ graph TD
         SAFE --> DISPATCH
         UZU_MOD --> DISPATCH
         
-        LLAMA["🦙 llama.cpp:server<br/>(ghcr.io/ggerganov/llama.cpp:server)"]
+        LLAMA["🦙 llama.cpp:server<br/>(ghcr.io/ggml-org/llama.cpp:server)"]
         VLLM["🚀 vLLM OpenAI Server<br/>(vllm/vllm-openai:latest)"]
         UZU["⚡ Uzu Server<br/>(trymirai/uzu:latest)"]
         
@@ -1521,7 +1521,7 @@ For hardware-isolated model serving with `cro serve`:
 - **GPU Acceleration**: Virtio-GPU is enabled by default with a 4 GB shared memory window (`--gpu-shm-size 4G`), routing guest OpenGL/Vulkan/Metal calls directly to Apple Silicon Metal or Linux DRM Venus.
 - **Inference Engines**: Pulled automatically by `cro` on first run (or custom images via `--image`):
   - `vllm/vllm-openai:latest` (vLLM OpenAI server with PagedAttention)
-  - `ghcr.io/ggerganov/llama.cpp:server` (llama.cpp server with Metal acceleration)
+  - `ghcr.io/ggml-org/llama.cpp:server` (llama.cpp server with Metal acceleration)
   - `trymirai/uzu:latest` (Uzu pure-Rust Apple Silicon Metal engine)
 
 ---

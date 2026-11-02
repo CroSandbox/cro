@@ -161,6 +161,20 @@ impl OciClient {
             }
         }
 
+        // 2b. Direct GHCR fallback if probe didn't return challenge
+        if reference.registry == "ghcr.io" {
+            let url = format!(
+                "https://ghcr.io/token?service=ghcr.io&scope=repository:{}:pull",
+                reference.repository
+            );
+            if let Ok(resp) = self.http.get(&url).send().await {
+                if resp.status().is_success() {
+                    let body: DockerTokenResponse = resp.json().await?;
+                    return Ok(body.token.or(body.access_token));
+                }
+            }
+        }
+
         Ok(None)
     }
 
@@ -398,12 +412,38 @@ impl OciClient {
             ),
         );
 
-        let resp = self
+        let mut resp = self
             .http
             .get(&manifest_url)
             .headers(headers.clone())
             .send()
             .await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Some(auth_hdr) = resp.headers().get(WWW_AUTHENTICATE) {
+                if let Ok(hdr_str) = auth_hdr.to_str() {
+                    if let Ok(Some(tok)) =
+                        self.token_from_www_authenticate(hdr_str, reference).await
+                    {
+                        let mut retry_headers = self.auth_headers(Some(&tok));
+                        retry_headers.insert(
+                            ACCEPT,
+                            HeaderValue::from_static(
+                                "application/vnd.docker.distribution.manifest.v2+json, \
+                                 application/vnd.docker.distribution.manifest.list.v2+json, \
+                                 application/vnd.oci.image.manifest.v1+json, \
+                                 application/vnd.oci.image.index.v1+json",
+                            ),
+                        );
+                        resp = self
+                            .http
+                            .get(&manifest_url)
+                            .headers(retry_headers)
+                            .send()
+                            .await?;
+                    }
+                }
+            }
+        }
         if !resp.status().is_success() {
             bail!("Failed to fetch manifest: HTTP {}", resp.status());
         }
@@ -491,7 +531,19 @@ impl OciClient {
         );
 
         let headers = self.auth_headers(token);
-        let resp = self.http.get(&url).headers(headers).send().await?;
+        let mut resp = self.http.get(&url).headers(headers).send().await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if let Some(auth_hdr) = resp.headers().get(WWW_AUTHENTICATE) {
+                if let Ok(hdr_str) = auth_hdr.to_str() {
+                    if let Ok(Some(tok)) =
+                        self.token_from_www_authenticate(hdr_str, reference).await
+                    {
+                        let retry_headers = self.auth_headers(Some(&tok));
+                        resp = self.http.get(&url).headers(retry_headers).send().await?;
+                    }
+                }
+            }
+        }
         if !resp.status().is_success() {
             bail!("Failed to download blob {}: HTTP {}", digest, resp.status());
         }

@@ -252,7 +252,7 @@ impl ServeConfig {
 
         match active_engine {
             ServeEngine::Vllm | ServeEngine::Auto => "vllm/vllm-openai:latest".to_string(),
-            ServeEngine::LlamaCpp => "ghcr.io/ggerganov/llama.cpp:server".to_string(),
+            ServeEngine::LlamaCpp => "ghcr.io/ggml-org/llama.cpp:server".to_string(),
             ServeEngine::Uzu => "trymirai/uzu:latest".to_string(),
         }
     }
@@ -302,7 +302,7 @@ impl ServeConfig {
                     .unwrap_or_else(|| format!("/models/{}", meta.name));
 
                 let mut cmd = vec![
-                    "/server".to_string(),
+                    "/app/llama-server".to_string(),
                     "-m".to_string(),
                     gguf_file,
                     "--host".to_string(),
@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(engine, ServeEngine::LlamaCpp);
 
         let image = config.resolve_image(engine);
-        assert_eq!(image, "ghcr.io/ggerganov/llama.cpp:server");
+        assert_eq!(image, "ghcr.io/ggml-org/llama.cpp:server");
 
         let cmd = config.build_container_cmd(engine, &meta);
         assert_eq!(cmd[0], "/server");
