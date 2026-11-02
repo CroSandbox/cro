@@ -19,7 +19,7 @@
   Sub-100ms cold boot times • Apple Silicon Metal & Linux DRM Venus GPU acceleration • Native Docker Compose orchestration • Zero-trust AI agent sandboxing • Zero CGO & zero runtime overhead.
 </p>
 
-[Quickstart](#-quickstart-in-30-seconds) • [Why CRO?](#-why-cro) • [Compose & YAML](#-declarative-compose--yaml) • [Architecture](#-architectural-dominance-cro-vs-alternatives) • [AI Sandboxing & HITL](#-ai-agent-sandboxing--gpu) • [Zero-Trust Networking](#-advanced-microvm-networking--zero-trust-security) • [Kubernetes](#-kubernetes--containerd-integration) • [Commands](#-complete-cli-command-reference) • [SDKs](#-multi-language-client-sdks)
+[Quickstart](#-quickstart-in-30-seconds) • [Why CRO?](#-why-cro) • [Compose & YAML](#-declarative-compose--yaml) • [Architecture](#-architectural-dominance-cro-vs-alternatives) • [AI Sandboxing & HITL](#-ai-agent-sandboxing--gpu) • [Zero-Trust Networking](#-advanced-microvm-networking--zero-trust-security) • [Kubernetes](#-kubernetes--containerd-integration) • [Commands](#-complete-cli-command-reference) • [Prerequisites & Submodules](#-prerequisites--submodules) • [SDKs](#-multi-language-client-sdks)
 
 ---
 
@@ -1410,28 +1410,147 @@ EOF
 
 ---
 
+## 📋 Prerequisites & Submodules
+
+`cro` relies on hardware virtualization acceleration and native platform hypervisors. Before building or running from source, ensure your host environment meets the prerequisites below.
+
+### 1. Hardware & Hypervisor Requirements
+
+| Platform | Virtualization Backend | Acceleration Support | Recommended Hardware |
+| :--- | :--- | :--- | :--- |
+| **macOS** | Apple Silicon `Hypervisor.framework` (HVF) | Metal Virtio-GPU (`virtio-gpu`), NEON | Apple Silicon (M1/M2/M3/M4/Pro/Max/Ultra) |
+| **macOS (Intel)** | macOS `Hypervisor.framework` (HVF) | CPU Virtualization (x86_64 VT-x) | Core i7/i9 (macOS 12+) |
+| **Linux** | KVM (`/dev/kvm`) | Linux DRM Venus / Virgl (`virtio-gpu`) | 64-bit x86_64 or aarch64 with hardware virt |
+
+> [!NOTE]
+> On Linux, ensure your user account has access to the `/dev/kvm` device node:
+> ```bash
+> sudo usermod -aG kvm $USER
+> # If running inside a cloud VM (AWS EC2, GCP, Azure), ensure Nested Virtualization is enabled.
+> ```
+
+---
+
+### 2. System Packages & Toolchains
+
+#### macOS (Apple Silicon & Intel)
+1. **Xcode Command Line Tools**:
+   ```bash
+   xcode-select --install
+   ```
+2. **Homebrew & Hypervisor Libraries (`libkrun` & `libkrunfw`)**:
+   ```bash
+   brew tap slp/krun
+   brew install libkrun libkrunfw
+   ```
+3. **Rust Toolchain (1.80+)**:
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+
+#### Linux (Fedora, RHEL, CentOS)
+```bash
+sudo dnf install -y dnf-plugins-core gcc make curl pkgconfig
+sudo dnf copr enable -y slp/krun
+sudo dnf install -y libkrun libkrunfw libkrun-devel
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+#### Linux (Ubuntu, Debian)
+```bash
+sudo apt-get update
+sudo apt-get install -y software-properties-common curl build-essential pkg-config
+sudo add-apt-repository -y ppa:slp/krun
+sudo apt-get update
+sudo apt-get install -y libkrun1 libkrunfw libkrun-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+#### Linux (Arch Linux)
+```bash
+yay -S libkrun libkrunfw
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+---
+
+### 3. Git Submodules (`libkrun` & `libkrunfw`)
+
+`cro` vendors the core hypervisor interfaces as git submodules:
+- [`libkrun`](https://github.com/libkrun/libkrun): Pure-Rust / C dynamic library providing the low-level virtual machine monitor (VMM) and device emulation.
+- [`libkrunfw`](https://github.com/libkrun/libkrunfw): Minimal, microVM-optimized Linux kernel firmware payload bundled for sub-100ms cold boots.
+
+#### Initializing Submodules
+When cloning for the first time:
+```bash
+git clone --recurse-submodules https://github.com/CroSandbox/cro.git
+cd cro
+```
+
+If you already cloned without `--recurse-submodules`:
+```bash
+git submodule update --init --recursive
+# Or use the convenience Makefile target:
+make submodules
+```
+
+#### Automatic Prerequisite & Submodule Verification
+Run the automated dependency checker and submodule initializer:
+```bash
+# Automated check for submodules, hypervisor readiness, Homebrew/KVM, and dependencies:
+make prereqs
+# (or alias: make deps)
+```
+
+#### Building Submodules from Source (Optional)
+If your distribution does not have pre-built `libkrun` packages or you need custom hypervisor modifications:
+```bash
+# Build libkrun dynamic library from submodule:
+make libkrun
+
+# Build libkrunfw firmware kernel from submodule:
+make libkrunfw
+```
+
+---
+
+### 4. Model Serving Prerequisites (`cro serve` & `cro vllm`)
+
+For hardware-isolated model serving with `cro serve`:
+- **Memory**: Minimum 8 GB host RAM (the inference microVM allocates 8 GB RAM by default to accommodate PyTorch and KV caches).
+- **GPU Acceleration**: Virtio-GPU is enabled by default with a 4 GB shared memory window (`--gpu-shm-size 4G`), routing guest OpenGL/Vulkan/Metal calls directly to Apple Silicon Metal or Linux DRM Venus.
+- **Inference Engines**: Pulled automatically by `cro` on first run (or custom images via `--image`):
+  - `vllm/vllm-openai:latest` (vLLM OpenAI server with PagedAttention)
+  - `ghcr.io/ggerganov/llama.cpp:server` (llama.cpp server with Metal acceleration)
+  - `trymirai/uzu:latest` (Uzu pure-Rust Apple Silicon Metal engine)
+
+---
+
 ## 🏗️ Building from Source
 
 ```bash
-# Clone with submodules:
+# 1. Clone repository with submodules:
 git clone --recurse-submodules https://github.com/CroSandbox/cro.git
 cd cro
 
-# Build all workspace binaries:
+# 2. Verify prerequisites and update submodules:
+make prereqs
+
+# 3. Build all workspace binaries:
 make build
 
-# Sign binaries with macOS Hypervisor entitlement:
+# 4. Sign binaries with macOS Hypervisor entitlement:
 make sign
 
-# Run all 238+ automated unit and integration tests:
+# 5. Run all 238+ automated unit and integration tests:
 make test
 
-# Type-check, lint, and formatting verification:
+# 6. Type-check, lint, and formatting verification:
 make check
 make clippy
 make fmt
 
-# Install binaries to /usr/local/bin (cro, microvm, runner, shim, operator):
+# 7. Install binaries to /usr/local/bin (cro, microvm, runner, shim, operator):
 make install
 ```
 

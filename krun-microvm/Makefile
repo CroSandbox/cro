@@ -1,4 +1,4 @@
-.PHONY: all build release test bench sign clean install preflight info help check clippy fmt
+.PHONY: all build release test bench sign clean install preflight info help check clippy fmt submodules prereqs deps
 
 PREFIX ?= /usr/local/bin
 SUDO ?= $(shell if [ ! -w "$(PREFIX)" ] && [ "$$(id -u)" != "0" ]; then echo "sudo"; fi)
@@ -16,11 +16,15 @@ help:
 	@echo "  make fmt         - Check code formatting"
 	@echo "  make release     - Build in release profile with LTO and code-signing"
 	@echo "  make test        - Run all unit and integration tests"
+	@echo "  make bench       - Run isolation and startup benchmarks"
 	@echo "  make sign        - Apply macOS Hypervisor entitlements to debug binaries"
 	@echo "  make install     - Install binaries to $$(PREFIX) (uses sudo if needed)"
 	@echo "  make preflight   - Run system virtualization preflight validation"
 	@echo "  make info        - Display system and microVM telemetry"
 	@echo "  make clean       - Remove target build artifacts"
+	@echo "  make submodules  - Initialize and update git submodules"
+	@echo "  make prereqs     - Check/install system prerequisites and update submodules"
+	@echo "  make deps        - Alias for make prereqs"
 
 check:
 	cargo check --workspace --all-targets
@@ -61,6 +65,17 @@ sign:
 
 clean:
 	cargo clean
+
+submodules:
+	@if [ -d "../.git" ] || [ -f "../.git" ]; then \
+		cd .. && git submodule update --init --recursive; \
+	fi
+
+prereqs: submodules
+	@echo "Checking system prerequisites..."
+	@./install.sh --no-build --no-sign --skip-submodules -y
+
+deps: prereqs
 
 install: release
 	@echo "Installing binaries to $(PREFIX)..."

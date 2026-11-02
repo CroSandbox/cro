@@ -1,4 +1,4 @@
-.PHONY: all help build release test bench check clippy fmt sign clean install preflight info submodules libkrun libkrunfw
+.PHONY: all help build release test bench check clippy fmt sign clean install preflight info submodules libkrun libkrunfw prereqs deps
 
 PREFIX ?= /usr/local/bin
 WORKSPACE_DIR := $(CURDIR)/krun-microvm
@@ -24,13 +24,21 @@ help:
 	@echo "  make info        - Display system, hypervisor, and microVM telemetry"
 	@echo "  make clean       - Remove compiled build artifacts"
 	@echo ""
-	@echo "Submodule Targets:"
-	@echo "  make submodules  - Initialize and update libkrun and libkrunfw submodules"
+	@echo "Submodule & Prerequisite Targets:"
+	@echo "  make prereqs     - Check/install system dependencies and initialize submodules"
+	@echo "  make deps        - Alias for make prereqs"
+	@echo "  make submodules  - Initialize and update libkrun and libkrunfw git submodules"
 	@echo "  make libkrun     - Build the libkrun C/Rust dynamic library submodule"
 	@echo "  make libkrunfw   - Build the libkrunfw firmware kernel submodule"
 
 submodules:
 	git submodule update --init --recursive
+
+prereqs: submodules
+	@echo "Checking system prerequisites..."
+	@./install.sh --no-build --no-sign --skip-submodules -y
+
+deps: prereqs
 
 build:
 	$(MAKE) -C $(WORKSPACE_DIR) build

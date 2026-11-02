@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)%20%7C%20Linux%20(KVM)-black.svg?style=for-the-badge&logo=apple)](https://github.com/CroSandbox/cro)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-188%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
+[![Tests](https://img.shields.io/badge/tests-238%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
 [![Cold Boot](https://img.shields.io/badge/boot_time-%3C100ms-success.svg?style=for-the-badge&logo=lightning)](https://github.com/CroSandbox/cro)
 [![Compose](https://img.shields.io/badge/orchestration-Docker%20Compose%20%7C%20K8s%20CRD-purple.svg?style=for-the-badge&logo=docker)](examples/krun-compose.yaml)
 
@@ -19,7 +19,7 @@
   Sub-100ms cold boot times • Apple Silicon Metal & Linux DRM Venus GPU acceleration • Native Docker Compose orchestration • Zero-trust AI agent sandboxing • Zero CGO & zero runtime overhead.
 </p>
 
-[Quickstart](#-quickstart-in-30-seconds) • [Why CRO?](#-why-cro) • [Compose & YAML](#-declarative-compose--yaml) • [Architecture](#-architectural-dominance-cro-vs-alternatives) • [AI Sandboxing & HITL](#-ai-agent-sandboxing--gpu) • [Zero-Trust Networking](#-advanced-microvm-networking--zero-trust-security) • [Kubernetes](#-kubernetes--containerd-integration) • [Commands](#-complete-cli-command-reference) • [SDKs](#-multi-language-client-sdks)
+[Quickstart](#-quickstart-in-30-seconds) • [Why CRO?](#-why-cro) • [Compose & YAML](#-declarative-compose--yaml) • [Architecture](#-architectural-dominance-cro-vs-alternatives) • [AI Sandboxing & HITL](#-ai-agent-sandboxing--gpu) • [Zero-Trust Networking](#-advanced-microvm-networking--zero-trust-security) • [Kubernetes](#-kubernetes--containerd-integration) • [Commands](#-complete-cli-command-reference) • [Prerequisites & Submodules](#-prerequisites--submodules) • [SDKs](#-multi-language-client-sdks)
 
 ---
 
@@ -104,10 +104,42 @@ cro kube down pod.yaml
 ### 7. Launch the Unstructured Document Intake & AI Threat Shield (`/unstructured`)
 ```bash
 # Start the Elixir OTP server with Web UI and REST API:
-cd sdks/elixir && PORT=4005 mix run --no-halt
+cd krun-microvm/sdks/elixir && PORT=4005 mix run --no-halt
 
 # Open the Web UI:
 open http://localhost:4005/unstructured
+```
+
+### 8. Package & Run AI Models via CNCF ModelPack (`cro model` & `cro run --model`)
+```bash
+# Package local model weights (GGUF, Safetensors, ONNX) into a CNCF ModelPack OCI layout:
+cro model pack -s ./models/llama3 -o ./llama3-modelpack -n llama-3.2-1b -f gguf -a llama -p q4_k_m
+
+# Inspect model architecture, layers, precision, and context length:
+cro model info ./llama3-modelpack
+
+# Pull and cache an AI ModelPack artifact from any standard OCI container registry:
+cro model pull ghcr.io/org/llama-3.2-1b:latest
+
+# Run an inference container with zero-copy VirtioFS DAX shared memory mapping:
+cro run --model ghcr.io/org/llama-3.2-1b:latest:/models/llm alpine:latest -- ls -lh /models/llm
+```
+
+### 9. Serve Models with Smart Auto-Dispatch & OpenAI API (`cro serve` / `cro vllm`)
+```bash
+# Serve any cached ModelPack, local model directory, or GGUF/Safetensors file:
+cro serve llama-3.2-1b -d
+
+# Send an OpenAI-compatible chat completion request:
+curl http://127.0.0.1:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "llama-3.2-1b",
+        "messages": [{"role": "user", "content": "Explain microVM VirtioFS DAX in one sentence."}]
+    }'
+
+# Or launch with strict vLLM engine, 16 GB RAM, and 8 vCPUs:
+cro vllm serve mistralai/Mistral-7B-v0.1 --engine vllm -m 16384 -c 8
 ```
 
 ---
@@ -532,6 +564,158 @@ cro run \
 
 ---
 
+## 📦 CNCF ModelPack Specification (`cro model`)
+
+`cro` natively adopts the **[CNCF ModelPack Specification](https://github.com/modelpack/model-spec)** (`modelpack/model-spec`), establishing vendor-neutral packaging, distribution, and zero-copy hypervisor execution for AI/ML models.
+
+### Key Capabilities
+
+1. **Vendor-Neutral OCI Distribution**:
+   AI models (weights, tokenizers, architecture descriptors, model cards) are packaged into standard OCI artifacts and stored directly in your container registry (GHCR, Docker Hub, Quay, Harbor) with dedicated media types:
+   - **Manifest**: `application/vnd.cncf.model.manifest.v1+json`
+   - **Config**: `application/vnd.cncf.model.config.v1+json`
+   - **Weight Layer**: `application/vnd.cncf.model.weight.v1.tar`
+   - **Config Layer**: `application/vnd.cncf.model.weight.config.v1.tar`
+   - **Tokenizer Layer**: `application/vnd.cncf.model.tokenizer.v1.tar`
+   - **Documentation**: `application/vnd.cncf.model.doc.v1.tar`
+
+2. **Zero-Copy VirtioFS DAX Execution**:
+   When launching a microVM with `--model <ref>[:<mount_path>]`, `cro` automatically inspects the model format (GGUF, Safetensors, ONNX) and provisions an appropriately sized **VirtioFS DAX (Direct Access) shared memory window**. Weights are directly `mmap`'d into the guest virtual address space without double-buffering or memory duplication.
+
+3. **Automatic Guest Environment Injection**:
+   Every attached ModelPack automatically injects guest runtime environment variables into `/.krun_config.json`:
+   - `MODEL_NAME`: Identifier of the model (e.g. `llama-3.2-1b-instruct`)
+   - `MODEL_PATH`: Guest mount point (default: `/models/<name>` or custom)
+   - `MODEL_FORMAT`: Weight serialization format (`gguf`, `safetensors`, `onnx`, `pytorch`)
+   - `MODEL_ARCHITECTURE`: Base neural network architecture (e.g. `llama`, `mistral`)
+   - `MODEL_PRECISION`: Quantization or precision level (e.g. `q4_k_m`, `fp16`)
+
+### Commands & Workflows
+
+```bash
+# Package local GGUF weights into a ModelPack OCI layout:
+cro model pack \
+    --source ./models/llama3 \
+    --output ./llama3-oci \
+    --name llama-3.2-1b-instruct \
+    --format gguf \
+    --architecture llama \
+    --precision q4_k_m \
+    --context-length 131072
+
+# Inspect ModelPack metadata and layers:
+cro model info ./llama3-oci
+
+# Pull and cache an AI ModelPack artifact from an OCI registry:
+cro model pull ghcr.io/meta-llama/llama-3.2-1b-instruct:latest
+
+# List all locally cached ModelPack models:
+cro model list
+
+# Run inference inside an isolated microVM with auto-DAX memory mapping:
+cro run --model ghcr.io/meta-llama/llama-3.2-1b-instruct:latest:/models/llm \
+    --gpu \
+    ghcr.io/ggerganov/llama.cpp:server \
+    -- -m /models/llm/llama-3.2-1b.Q4_K_M.gguf --port 8080
+```
+
+---
+
+## ⚡ Multi-Engine Model Serving Subsystem (`cro serve` & `cro vllm`)
+
+`cro` provides a premier model serving subsystem that transforms any CNCF ModelPack, Hugging Face checkpoint, or local directory into a production-grade, hardware-isolated OpenAI-compatible inference endpoint (`/v1/chat/completions`, `/v1/models`).
+
+```mermaid
+graph TD
+    subgraph "Model Source"
+        MP["📦 CNCF ModelPack (OCI Artifact)"]
+        GGUF["📄 GGUF Weights (.gguf)"]
+        SAFE["📑 Safetensors / PyTorch / ONNX"]
+        UZU_MOD["⚡ Uzu Metal Model (.uzu)"]
+    end
+
+    subgraph "Smart Engine Auto-Dispatch"
+        DISPATCH{"Engine Dispatcher"}
+        MP --> DISPATCH
+        GGUF --> DISPATCH
+        SAFE --> DISPATCH
+        UZU_MOD --> DISPATCH
+        
+        LLAMA["🦙 llama.cpp:server<br/>(ghcr.io/ggerganov/llama.cpp:server)"]
+        VLLM["🚀 vLLM OpenAI Server<br/>(vllm/vllm-openai:latest)"]
+        UZU["⚡ Uzu Server<br/>(trymirai/uzu:latest)"]
+        
+        DISPATCH -->|"Format: Gguf"| LLAMA
+        DISPATCH -->|"Format: Safetensors / PyTorch"| VLLM
+        DISPATCH -->|"Format: Uzu"| UZU
+    end
+
+    subgraph "MicroVM Hypervisor Isolation"
+        DAX["⚡ VirtioFS DAX (Direct Access Window)<br/>Zero-Copy Host-to-Guest mmap"]
+        GPU["🎮 Virtio-GPU (Apple Silicon Metal / DRM Venus)"]
+        UVM["🛡️ Hardware MicroVM (8GB+ RAM, 4+ vCPUs)"]
+        
+        LLAMA --> UVM
+        VLLM --> UVM
+        UZU --> UVM
+        DAX --> UVM
+        GPU --> UVM
+    end
+
+    subgraph "Clients & API Consumption"
+        EP["🌐 OpenAI API Gateway: http://127.0.0.1:8000/v1"]
+        UVM --> EP
+        CURL["cURL / HTTP Client"] --> EP
+        SDK["OpenAI / LangChain / LlamaIndex SDK"] --> EP
+        GATEWAY["🛡️ Cloudflare Pingora Token Gateway"] --> EP
+    end
+```
+
+### Key Capabilities
+
+1. **Smart Engine Auto-Dispatch vs. Strict Selection**:
+   - **`Auto` (Default)**: Automatically detects model format and architecture. Safetensors/PyTorch/MLX checkpoints dispatch to `vLLM` with PagedAttention and continuous batching; GGUF models dispatch to `llama.cpp` using Metal GPU acceleration; `.uzu` models dispatch to `uzu`.
+   - **Strict Selection**: Override at any time with `--engine vllm`, `--engine llamacpp`, or `--engine uzu`. Custom images can be supplied via `--engine-image <image>`.
+
+2. **VirtioFS DAX Zero-Copy Weight Injection**:
+   Model weights are never copied or double-buffered. A dedicated DAX window is automatically calculated and provisioned into the guest's physical address space, allowing instant model loading without guest memory pressure.
+
+3. **Production Lifecycles & Live Health Probing**:
+   `cro serve` actively polls `/health` and `/v1/models` using exponential backoff up to 120s before returning. When ready, it renders a terminal summary card with active endpoints and ready-to-run `curl` commands.
+
+4. **Multi-Service Declarative Compose & Token Governance**:
+   Deploy full-stack inference pipelines pairing `vLLM` backends with a Cloudflare Pingora reverse proxy enforcing zero-trust egress and strict token ceilings (`examples/vllm-compose.yaml`).
+
+### Usage Examples
+
+```bash
+# 1. Zero-config serve (auto-detects format, auto-provisions DAX & GPU):
+cro serve llama-3.2-1b
+
+# 2. Run in background (detached) and wait for readiness probe:
+cro serve llama-3.2-1b -d --wait
+
+# 3. Query the endpoint using standard OpenAI schema:
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-3.2-1b",
+    "messages": [{"role": "user", "content": "What are the advantages of microVM isolation?"}]
+  }'
+
+# 4. First-class alias `cro vllm` with custom context length and tensor parallelism:
+cro vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --max-model-len 8192 \
+  --memory 16384 \
+  --cpus 8 \
+  --port 8000
+
+# 5. Declarative multi-service deployment with Compose & Pingora token gateway:
+cro compose up -f examples/vllm-compose.yaml -d
+```
+
+---
+
 ## 🌐 Advanced MicroVM Networking & Zero-Trust Security
 
 `cro` provides a versatile, defense-in-depth networking architecture engineered for everything from local rootless development to multi-tenant cloud Kubernetes clusters:
@@ -682,6 +866,14 @@ cro network proxy \
     --secret OPENAI_API_KEY=env:HOST_KEY \
     --max-tokens 50000
 ```
+
+#### 🛡️ Enhanced Defense-in-Depth & Action Scoping
+- **Explicit Default-Deny Egress Policy (`--default-deny` / `--deny-all`)**: Enforces absolute outbound isolation. Even with zero allowlisted domains, 100% of outbound connections are rejected by default.
+- **Cryptographic Payload Binding for Human Approvals**: Intercepted sensitive/mutating requests compute a canonical SHA-256 digest (`payload_sha256`) over the HTTP method, destination, path, and payload body. Any attempt to mutate payloads or replay approval tokens with modified contents is detected and immediately rejected.
+- **Fine-Grained Credential Scoping (`CredentialScope`)**: Restricts injected secrets to specific upstream domains, allowed HTTP verbs (e.g. read-only `GET`), and exact API path endpoints (e.g. `/v1/customers` allowed, `/v1/refunds` strictly denied).
+- **Capability Policy Engine (`CapabilityPolicy`)**: Enforces sandbox filesystem boundaries (read-only system zones, restricted write directories like `/workspace` and `/tmp`, concealed sensitive paths), binary execution whitelists, and state mutation privileges.
+- **Hardened Dockerfile COPY/ADD Path Containment**: In-process build engine resolves lexical `..` traversals and validates canonical paths, strictly preventing rootfs breakout attacks and external symlink escapes.
+- **Startup & Isolation Benchmarks (`make bench`)**: Reproducible micro-benchmarks measuring sub-microsecond configuration instantiation, 6.9M+ egress policy evaluations/sec, and 57+ MB/s scoped secret substitution throughput.
 
 ---
 
@@ -1207,6 +1399,9 @@ EOF
 | **`network pingora`**| `cro network pingora --listen <addr>` | Start a Cloudflare Pingora L7 gateway or zero-trust egress proxy |
 | **`metrics`** | `cro metrics [--listen <addr>]` | Export Prometheus metrics or serve live Prometheus scrape endpoint |
 | **`artifact`** | `cro artifact pull / list` | Manage detached OCI artifacts (LLM weights, datasets, toolchains) |
+| **`model`** | `cro model pull / list / info / pack` | Manage AI/ML models conforming to CNCF ModelPack Spec with zero-copy DAX |
+| **`serve`** | `cro serve <model> [-e auto|vllm|llamacpp|uzu] [-p <port>] [-d]` | Serve AI models via OpenAI-compatible API with smart auto-dispatch and zero-copy DAX |
+| **`vllm`** | `cro vllm serve <model> [options]` | Dedicated CLI alias for model serving with vLLM, llama.cpp, or uzu engines |
 | **`containerd`**| `cro containerd install / status` | Manage containerd v2 runtime shim (`containerd-shim-krun-v2`) |
 | **`preflight`** | `cro preflight` | Run hypervisor preflight checks (macOS Hypervisor.framework / Linux KVM) |
 | **`info`** | `cro info` | Display host hypervisor capabilities, cache size, and system state |
@@ -1215,28 +1410,147 @@ EOF
 
 ---
 
+## 📋 Prerequisites & Submodules
+
+`cro` relies on hardware virtualization acceleration and native platform hypervisors. Before building or running from source, ensure your host environment meets the prerequisites below.
+
+### 1. Hardware & Hypervisor Requirements
+
+| Platform | Virtualization Backend | Acceleration Support | Recommended Hardware |
+| :--- | :--- | :--- | :--- |
+| **macOS** | Apple Silicon `Hypervisor.framework` (HVF) | Metal Virtio-GPU (`virtio-gpu`), NEON | Apple Silicon (M1/M2/M3/M4/Pro/Max/Ultra) |
+| **macOS (Intel)** | macOS `Hypervisor.framework` (HVF) | CPU Virtualization (x86_64 VT-x) | Core i7/i9 (macOS 12+) |
+| **Linux** | KVM (`/dev/kvm`) | Linux DRM Venus / Virgl (`virtio-gpu`) | 64-bit x86_64 or aarch64 with hardware virt |
+
+> [!NOTE]
+> On Linux, ensure your user account has access to the `/dev/kvm` device node:
+> ```bash
+> sudo usermod -aG kvm $USER
+> # If running inside a cloud VM (AWS EC2, GCP, Azure), ensure Nested Virtualization is enabled.
+> ```
+
+---
+
+### 2. System Packages & Toolchains
+
+#### macOS (Apple Silicon & Intel)
+1. **Xcode Command Line Tools**:
+   ```bash
+   xcode-select --install
+   ```
+2. **Homebrew & Hypervisor Libraries (`libkrun` & `libkrunfw`)**:
+   ```bash
+   brew tap slp/krun
+   brew install libkrun libkrunfw
+   ```
+3. **Rust Toolchain (1.80+)**:
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+
+#### Linux (Fedora, RHEL, CentOS)
+```bash
+sudo dnf install -y dnf-plugins-core gcc make curl pkgconfig
+sudo dnf copr enable -y slp/krun
+sudo dnf install -y libkrun libkrunfw libkrun-devel
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+#### Linux (Ubuntu, Debian)
+```bash
+sudo apt-get update
+sudo apt-get install -y software-properties-common curl build-essential pkg-config
+sudo add-apt-repository -y ppa:slp/krun
+sudo apt-get update
+sudo apt-get install -y libkrun1 libkrunfw libkrun-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+#### Linux (Arch Linux)
+```bash
+yay -S libkrun libkrunfw
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+---
+
+### 3. Git Submodules (`libkrun` & `libkrunfw`)
+
+`cro` vendors the core hypervisor interfaces as git submodules:
+- [`libkrun`](https://github.com/libkrun/libkrun): Pure-Rust / C dynamic library providing the low-level virtual machine monitor (VMM) and device emulation.
+- [`libkrunfw`](https://github.com/libkrun/libkrunfw): Minimal, microVM-optimized Linux kernel firmware payload bundled for sub-100ms cold boots.
+
+#### Initializing Submodules
+When cloning for the first time:
+```bash
+git clone --recurse-submodules https://github.com/CroSandbox/cro.git
+cd cro
+```
+
+If you already cloned without `--recurse-submodules`:
+```bash
+git submodule update --init --recursive
+# Or use the convenience Makefile target:
+make submodules
+```
+
+#### Automatic Prerequisite & Submodule Verification
+Run the automated dependency checker and submodule initializer:
+```bash
+# Automated check for submodules, hypervisor readiness, Homebrew/KVM, and dependencies:
+make prereqs
+# (or alias: make deps)
+```
+
+#### Building Submodules from Source (Optional)
+If your distribution does not have pre-built `libkrun` packages or you need custom hypervisor modifications:
+```bash
+# Build libkrun dynamic library from submodule:
+make libkrun
+
+# Build libkrunfw firmware kernel from submodule:
+make libkrunfw
+```
+
+---
+
+### 4. Model Serving Prerequisites (`cro serve` & `cro vllm`)
+
+For hardware-isolated model serving with `cro serve`:
+- **Memory**: Minimum 8 GB host RAM (the inference microVM allocates 8 GB RAM by default to accommodate PyTorch and KV caches).
+- **GPU Acceleration**: Virtio-GPU is enabled by default with a 4 GB shared memory window (`--gpu-shm-size 4G`), routing guest OpenGL/Vulkan/Metal calls directly to Apple Silicon Metal or Linux DRM Venus.
+- **Inference Engines**: Pulled automatically by `cro` on first run (or custom images via `--image`):
+  - `vllm/vllm-openai:latest` (vLLM OpenAI server with PagedAttention)
+  - `ghcr.io/ggerganov/llama.cpp:server` (llama.cpp server with Metal acceleration)
+  - `trymirai/uzu:latest` (Uzu pure-Rust Apple Silicon Metal engine)
+
+---
+
 ## 🏗️ Building from Source
 
 ```bash
-# Clone with submodules:
+# 1. Clone repository with submodules:
 git clone --recurse-submodules https://github.com/CroSandbox/cro.git
 cd cro
 
-# Build all workspace binaries:
+# 2. Verify prerequisites and update submodules:
+make prereqs
+
+# 3. Build all workspace binaries:
 make build
 
-# Sign binaries with macOS Hypervisor entitlement:
+# 4. Sign binaries with macOS Hypervisor entitlement:
 make sign
 
-# Run all 188+ automated unit and integration tests:
+# 5. Run all 238+ automated unit and integration tests:
 make test
 
-# Type-check, lint, and formatting verification:
+# 6. Type-check, lint, and formatting verification:
 make check
 make clippy
 make fmt
 
-# Install binaries to /usr/local/bin (cro, microvm, runner, shim, operator):
+# 7. Install binaries to /usr/local/bin (cro, microvm, runner, shim, operator):
 make install
 ```
 
