@@ -26,6 +26,7 @@ pub async fn handle_sandbox(
     memory: u32,
     secrets: Vec<String>,
     allow_hosts: Vec<String>,
+    default_deny: bool,
     max_tokens: Option<u64>,
     hitl: bool,
     gpu: bool,
@@ -188,6 +189,10 @@ pub async fn handle_sandbox(
 
     for host in &allow_hosts {
         builder = builder.allow_host(host);
+    }
+
+    if default_deny {
+        builder = builder.default_deny(true);
     }
 
     if let Some(tokens) = max_tokens {

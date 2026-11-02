@@ -16,11 +16,31 @@ pub struct EgressPolicy {
     /// Permitted destinations in `host:port`, `host`, `CIDR` (e.g. `10.0.0.0/8`),
     /// or wildcard formats (e.g. `["api.openai.com:443", "*.github.com:443", "*:443", "192.168.1.0/24"]`).
     pub allow_hosts: Vec<String>,
+    /// When `default_deny` is enabled, outbound network access is strictly blocked by default.
+    /// If `allow_hosts` is empty and `default_deny` is true, zero external egress is permitted.
+    #[serde(default)]
+    pub default_deny: bool,
 }
 
 impl EgressPolicy {
     pub fn new(allow_hosts: Vec<String>) -> Self {
-        Self { allow_hosts }
+        Self {
+            allow_hosts,
+            default_deny: false,
+        }
+    }
+
+    /// Creates an explicit default-deny policy where all external traffic is blocked unless explicitly allowlisted.
+    pub fn default_deny() -> Self {
+        Self {
+            allow_hosts: Vec::new(),
+            default_deny: true,
+        }
+    }
+
+    pub fn with_default_deny(mut self, default_deny: bool) -> Self {
+        self.default_deny = default_deny;
+        self
     }
 
     /// Determines whether an outbound request to `(target_host, target_port)` is permitted.
@@ -28,9 +48,10 @@ impl EgressPolicy {
     /// Rules:
     /// 1. Cloud metadata endpoints (AWS, GCP, Azure, Alibaba, OpenStack) are strictly denied
     ///    unless explicitly allowed by a specific matching rule.
-    /// 2. If `allow_hosts` is empty, egress is unconstrained (standard container networking),
+    /// 2. If `default_deny` is enabled and `allow_hosts` is empty, egress is 100% blocked.
+    /// 3. If `allow_hosts` is empty and `default_deny` is false, egress is unconstrained (standard container networking),
     ///    except cloud metadata which remains strictly blocked.
-    /// 3. If `allow_hosts` is non-empty, all unlisted destinations are denied (default-deny egress).
+    /// 4. If `allow_hosts` is non-empty, all unlisted destinations are denied.
     pub fn is_allowed(&self, target_host: &str, target_port: u16) -> bool {
         // Strict guard against cloud instance metadata exfiltration across all major clouds
         if is_cloud_metadata(target_host) {
@@ -38,7 +59,7 @@ impl EgressPolicy {
         }
 
         if self.allow_hosts.is_empty() {
-            return true;
+            return !self.default_deny;
         }
 
         self.matches_any(target_host, target_port)
@@ -230,14 +251,15 @@ pub fn is_cloud_metadata_ip(ip: &IpAddr) -> bool {
     }
 }
 
-/// Zero-trust secret substitution engine.
+/// Zero-trust secret substitution engine with fine-grained credential scoping.
 ///
 /// Replaces placeholder tokens (e.g. `krun-secret:OPENAI_API_KEY` and URL-encoded `krun-secret%3A...`)
-/// with real credentials in-flight during outbound proxy requests.
+/// with real credentials in-flight during outbound proxy requests, strictly enforcing API action scopes.
 #[derive(Debug, Clone, Default)]
 pub struct SecretSubstitution {
     mapping: Vec<(Vec<u8>, Vec<u8>)>,
     raw_keys: Vec<String>,
+    scopes: crate::secrets::ScopeAuthorizer,
 }
 
 impl SecretSubstitution {
@@ -257,7 +279,65 @@ impl SecretSubstitution {
             let url_ph_lower = format!("krun-secret%3a{}", key);
             mapping.push((url_ph_lower.into_bytes(), val.as_bytes().to_vec()));
         }
-        Self { mapping, raw_keys }
+        Self {
+            mapping,
+            raw_keys,
+            scopes: crate::secrets::ScopeAuthorizer::default(),
+        }
+    }
+
+    pub fn with_authorizer(mut self, scopes: crate::secrets::ScopeAuthorizer) -> Self {
+        self.scopes = scopes;
+        self
+    }
+
+    pub fn with_scope(mut self, scope: crate::secrets::CredentialScope) -> Self {
+        self.scopes.add_scope(scope);
+        self
+    }
+
+    /// Verifies whether secrets referenced in `buffer` are authorized for the specified
+    /// HTTP method, host, and path.
+    pub fn check_action_authorized(
+        &self,
+        buffer: &[u8],
+        method: &str,
+        host: &str,
+        path: &str,
+    ) -> Result<()> {
+        for key in &self.raw_keys {
+            let raw_ph = format!("krun-secret:{}", key);
+            let url_upper = format!("krun-secret%3A{}", key);
+            let url_lower = format!("krun-secret%3a{}", key);
+
+            let raw_b = raw_ph.as_bytes();
+            let upper_b = url_upper.as_bytes();
+            let lower_b = url_lower.as_bytes();
+
+            let found = (buffer.len() >= raw_b.len()
+                && buffer.windows(raw_b.len()).any(|w| w == raw_b))
+                || (buffer.len() >= upper_b.len()
+                    && buffer.windows(upper_b.len()).any(|w| w == upper_b))
+                || (buffer.len() >= lower_b.len()
+                    && buffer.windows(lower_b.len()).any(|w| w == lower_b));
+
+            if found {
+                self.scopes.authorize(key, method, host, path)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Replaces placeholder occurrences inside an HTTP request buffer after verifying action scope.
+    pub fn substitute_authorized(
+        &self,
+        buffer: &[u8],
+        method: &str,
+        host: &str,
+        path: &str,
+    ) -> Result<Vec<u8>> {
+        self.check_action_authorized(buffer, method, host, path)?;
+        Ok(self.substitute(buffer))
     }
 
     /// Replaces placeholder occurrences inside an HTTP request buffer.
@@ -868,9 +948,35 @@ async fn handle_client(
             }
         }
 
-        // Apply secret substitution on outbound headers and body
+        // Apply secret substitution on outbound headers and body after scope check
         let headers_raw = &buf[..header_end];
         let body_raw = &buf[body_start..];
+
+        if let Err(e) = secrets.check_action_authorized(headers_raw, &method, &host, &path) {
+            blocked_requests.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!("Credential scope violation in request headers: {e}");
+            let err_body = format!("Credential scope authorization denied: {e}");
+            let resp = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\n\r\n{}",
+                err_body.len(),
+                err_body
+            );
+            client.write_all(resp.as_bytes()).await?;
+            return Ok(());
+        }
+
+        if let Err(e) = secrets.check_action_authorized(body_raw, &method, &host, &path) {
+            blocked_requests.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!("Credential scope violation in request body: {e}");
+            let err_body = format!("Credential scope authorization denied: {e}");
+            let resp = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\n\r\n{}",
+                err_body.len(),
+                err_body
+            );
+            client.write_all(resp.as_bytes()).await?;
+            return Ok(());
+        }
 
         let substituted_headers = secrets.substitute(headers_raw);
         let substituted_body = secrets.substitute(body_raw);
@@ -1036,6 +1142,26 @@ mod tests {
     }
 
     #[test]
+    fn test_egress_policy_explicit_default_deny() {
+        let deny_all_policy = EgressPolicy::default_deny();
+        assert!(deny_all_policy.default_deny);
+        // All external traffic blocked
+        assert!(!deny_all_policy.is_allowed("api.openai.com", 443));
+        assert!(!deny_all_policy.is_allowed("example.com", 80));
+        assert!(!deny_all_policy.is_allowed("1.1.1.1", 53));
+        assert!(!deny_all_policy.is_allowed("169.254.169.254", 80));
+
+        // When combined with specific allowed hosts
+        let scoped_policy = EgressPolicy::default_deny().with_default_deny(true);
+        let mut scoped_policy = scoped_policy;
+        scoped_policy
+            .allow_hosts
+            .push("api.github.com:443".to_string());
+        assert!(scoped_policy.is_allowed("api.github.com", 443));
+        assert!(!scoped_policy.is_allowed("api.openai.com", 443));
+    }
+
+    #[test]
     fn test_egress_policy_cidr_matching() {
         let policy = EgressPolicy::new(vec![
             "10.0.0.0/8:8080".to_string(),
@@ -1081,6 +1207,56 @@ mod tests {
         assert!(out_str.contains("token=my-real-secret-999"));
         assert!(out_str.contains("other=my-real-secret-999"));
         assert!(!out_str.contains("krun-secret"));
+    }
+
+    #[test]
+    fn test_secret_substitution_with_credential_scope() {
+        let secrets = vec![(
+            "STRIPE_KEY".to_string(),
+            "mock_stripe_key_1234567890".to_string(),
+        )];
+        let scope = crate::secrets::CredentialScope::new("STRIPE_KEY")
+            .with_host("api.stripe.com")
+            .with_method("GET")
+            .with_path("/v1/customers");
+
+        let engine = SecretSubstitution::new(&secrets).with_scope(scope);
+
+        let input =
+            b"GET /v1/customers HTTP/1.1\r\nAuthorization: Bearer krun-secret:STRIPE_KEY\r\n\r\n";
+
+        // Authorized call succeeds
+        let res_auth =
+            engine.substitute_authorized(input, "GET", "api.stripe.com", "/v1/customers");
+        assert!(res_auth.is_ok());
+        let res_str = String::from_utf8(res_auth.unwrap()).unwrap();
+        assert!(res_str.contains("mock_stripe_key_1234567890"));
+
+        // Unauthorized method (POST) is rejected
+        let res_post =
+            engine.substitute_authorized(input, "POST", "api.stripe.com", "/v1/customers");
+        assert!(res_post.is_err());
+        assert!(res_post
+            .unwrap_err()
+            .to_string()
+            .contains("Credential scope violation"));
+
+        // Unauthorized host (attacker.com) is rejected
+        let res_host =
+            engine.substitute_authorized(input, "GET", "evil.attacker.com", "/v1/customers");
+        assert!(res_host.is_err());
+        assert!(res_host
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be transmitted to host"));
+
+        // Unauthorized path (/v1/refunds) is rejected
+        let res_path = engine.substitute_authorized(input, "GET", "api.stripe.com", "/v1/refunds");
+        assert!(res_path.is_err());
+        assert!(res_path
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be used with path"));
     }
 
     #[test]

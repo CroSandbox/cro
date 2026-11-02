@@ -152,6 +152,10 @@ pub struct RunArgs {
     #[arg(long = "allow-host", alias = "allow-net")]
     pub allow_hosts: Vec<String>,
 
+    /// Enforce explicit default-deny network egress policy (blocks all external traffic unless explicitly permitted)
+    #[arg(long = "default-deny", alias = "deny-all")]
+    pub default_deny: bool,
+
     /// Inject secret via in-flight substitution (KEY=VALUE, KEY=env:VAR_NAME, or KEY=file:/path)
     #[arg(long = "secret")]
     pub secrets: Vec<String>,
@@ -285,6 +289,10 @@ pub enum Commands {
         /// Allow outbound network egress to explicitly permitted destination (e.g. api.openai.com:443, *.github.com:443)
         #[arg(long = "allow-host", alias = "allow-net")]
         allow_hosts: Vec<String>,
+
+        /// Enforce explicit default-deny network egress policy (blocks all external traffic unless explicitly permitted)
+        #[arg(long = "default-deny", alias = "deny-all")]
+        default_deny: bool,
 
         /// Hard ceiling on cumulative LLM tokens (prompt + completion) consumed by the microVM
         #[arg(long = "max-tokens")]

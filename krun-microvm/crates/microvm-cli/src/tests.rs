@@ -61,6 +61,28 @@ fn test_cli_parse_egress_and_secrets() {
 }
 
 #[test]
+fn test_cli_parse_default_deny() {
+    let args = vec!["microvm", "run", "--default-deny", "alpine:latest"];
+    let cli = Cli::try_parse_from(args).unwrap();
+    match cli.command {
+        Commands::Run(run) => {
+            assert!(run.default_deny);
+            assert!(run.allow_hosts.is_empty());
+        }
+        _ => panic!("Expected Commands::Run"),
+    }
+
+    let sandbox_args = vec!["microvm", "sandbox", "claude", "--deny-all"];
+    let cli_sb = Cli::try_parse_from(sandbox_args).unwrap();
+    match cli_sb.command {
+        Commands::Sandbox { default_deny, .. } => {
+            assert!(default_deny);
+        }
+        _ => panic!("Expected Commands::Sandbox"),
+    }
+}
+
+#[test]
 fn test_cli_parse_disk_parallel_reads_and_fs_options() {
     let args = vec![
         "microvm",

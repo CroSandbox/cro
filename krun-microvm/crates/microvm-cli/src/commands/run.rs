@@ -46,6 +46,7 @@ pub async fn handle_run(run: RunArgs) -> Result<()> {
         gpu_shm_size,
         no_sandbox,
         allow_hosts,
+        default_deny,
         secrets,
         max_tokens,
         kernel,
@@ -135,6 +136,10 @@ pub async fn handle_run(run: RunArgs) -> Result<()> {
 
     for h in allow_hosts {
         builder = builder.allow_host(h);
+    }
+
+    if default_deny {
+        builder = builder.default_deny(true);
     }
 
     for s in secrets {

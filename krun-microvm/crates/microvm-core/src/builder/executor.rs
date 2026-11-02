@@ -10,8 +10,78 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
+
+/// Normalizes a path lexically and verifies that it does not escape `base` via `..`.
+pub fn safe_normalize_relative(path: &Path) -> Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Normal(c) => normalized.push(c),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    bail!(
+                        "Path containment violation: path '{}' escapes base directory via '..'",
+                        path.display()
+                    );
+                }
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    Ok(normalized)
+}
+
+/// Securely resolves a path within a base directory, verifying both lexical containment
+/// and canonical symlink containment.
+pub fn secure_resolve_in_base(base: &Path, rel_or_abs: &Path) -> Result<PathBuf> {
+    let normalized_rel = safe_normalize_relative(rel_or_abs)?;
+    let candidate = base.join(normalized_rel);
+
+    let canonical_base = base
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize base directory '{}'", base.display()))?;
+
+    if candidate.exists() {
+        let canonical_candidate = candidate.canonicalize().with_context(|| {
+            format!(
+                "Failed to canonicalize candidate path '{}'",
+                candidate.display()
+            )
+        })?;
+        if !canonical_candidate.starts_with(&canonical_base) {
+            bail!(
+                "Path containment violation: candidate '{}' resolves to '{}' outside base '{}'",
+                candidate.display(),
+                canonical_candidate.display(),
+                base.display()
+            );
+        }
+        Ok(candidate)
+    } else {
+        // Find closest existing ancestor and verify containment
+        let mut curr = candidate.as_path();
+        while let Some(parent) = curr.parent() {
+            if parent.exists() {
+                let canonical_parent = parent.canonicalize().with_context(|| {
+                    format!("Failed to canonicalize ancestor '{}'", parent.display())
+                })?;
+                if !canonical_parent.starts_with(&canonical_base) {
+                    bail!(
+                        "Path containment violation: ancestor directory '{}' resolves to '{}' outside base '{}'",
+                        parent.display(),
+                        canonical_parent.display(),
+                        base.display()
+                    );
+                }
+                break;
+            }
+            curr = parent;
+        }
+        Ok(candidate)
+    }
+}
 
 /// Configuration options for building an image.
 #[derive(Debug, Clone)]
@@ -529,14 +599,15 @@ impl BuildEngine {
         guest_rootfs: &Path,
         dockerignore: Option<&Dockerignore>,
     ) -> Result<()> {
-        let resolved_dest = if dest.starts_with('/') {
-            PathBuf::from(dest)
+        let dest_path = Path::new(dest);
+        let resolved_dest = if dest_path.is_absolute() {
+            dest_path.to_path_buf()
         } else {
-            current_workdir.join(dest)
+            current_workdir.join(dest_path)
         };
 
-        let rel_dest = resolved_dest.strip_prefix("/").unwrap_or(&resolved_dest);
-        let guest_dest = guest_rootfs.join(rel_dest);
+        // Normalize destination relative to guest rootfs and verify containment
+        let guest_dest = secure_resolve_in_base(guest_rootfs, &resolved_dest)?;
 
         let dest_is_dir = dest.ends_with('/') || dest.ends_with('.');
         if dest_is_dir && !guest_dest.exists() {
@@ -544,10 +615,33 @@ impl BuildEngine {
         }
 
         for src_pattern in sources {
-            let src_path = src_base.join(src_pattern.strip_prefix("./").unwrap_or(src_pattern));
+            let rel_src = Path::new(src_pattern.strip_prefix("./").unwrap_or(src_pattern));
+            // Securely resolve source within src_base (build context or reference stage rootfs)
+            let src_path = secure_resolve_in_base(src_base, rel_src)?;
 
             if !src_path.exists() {
                 bail!("Source path does not exist: {}", src_path.display());
+            }
+
+            let file_type = fs::symlink_metadata(&src_path)?.file_type();
+            if file_type.is_symlink() {
+                let canonical_src_base = src_base
+                    .canonicalize()
+                    .unwrap_or_else(|_| src_base.to_path_buf());
+                let canonical_target = src_path.canonicalize().with_context(|| {
+                    format!(
+                        "Failed to canonicalize symlink target '{}'",
+                        src_path.display()
+                    )
+                })?;
+                if !canonical_target.starts_with(&canonical_src_base) {
+                    bail!(
+                        "Path containment violation: symlink '{}' resolves to '{}' outside source base '{}'",
+                        src_path.display(),
+                        canonical_target.display(),
+                        src_base.display()
+                    );
+                }
             }
 
             if src_path.is_file() {
@@ -560,18 +654,32 @@ impl BuildEngine {
                 }
 
                 let target_file = if dest_is_dir {
-                    let file_name = src_path.file_name().unwrap();
+                    let file_name = src_path.file_name().context("Invalid source filename")?;
                     guest_dest.join(file_name)
                 } else {
                     guest_dest.clone()
                 };
+
+                // Double check target_file containment
+                let target_file = secure_resolve_in_base(
+                    guest_rootfs,
+                    target_file
+                        .strip_prefix(guest_rootfs)
+                        .unwrap_or(&target_file),
+                )?;
 
                 if let Some(parent) = target_file.parent() {
                     let _ = fs::create_dir_all(parent);
                 }
                 fs::copy(&src_path, &target_file)?;
             } else if src_path.is_dir() {
-                self.copy_dir_filtered(&src_path, &guest_dest, src_base, dockerignore)?;
+                self.copy_dir_filtered(
+                    &src_path,
+                    &guest_dest,
+                    src_base,
+                    guest_rootfs,
+                    dockerignore,
+                )?;
             }
         }
 
@@ -583,12 +691,45 @@ impl BuildEngine {
         src_dir: &Path,
         dst_dir: &Path,
         context_base: &Path,
+        guest_rootfs: &Path,
         dockerignore: Option<&Dockerignore>,
     ) -> Result<()> {
-        fs::create_dir_all(dst_dir)?;
+        let dst_dir = secure_resolve_in_base(
+            guest_rootfs,
+            dst_dir.strip_prefix(guest_rootfs).unwrap_or(dst_dir),
+        )?;
+        fs::create_dir_all(&dst_dir)?;
+
+        let canonical_context_base = context_base
+            .canonicalize()
+            .unwrap_or_else(|_| context_base.to_path_buf());
+
         for entry in fs::read_dir(src_dir)? {
             let entry = entry?;
             let path = entry.path();
+            let file_type = entry.file_type()?;
+
+            // Guard against symlink traversal escaping context_base
+            if file_type.is_symlink() {
+                let canonical_target = match path.canonicalize() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        bail!(
+                            "Path containment violation: dangling or unresolvable symlink '{}': {}",
+                            path.display(),
+                            e
+                        );
+                    }
+                };
+                if !canonical_target.starts_with(&canonical_context_base) {
+                    bail!(
+                        "Path containment violation: symlink '{}' resolves to '{}' outside build context '{}'",
+                        path.display(),
+                        canonical_target.display(),
+                        context_base.display()
+                    );
+                }
+            }
 
             if let Some(di) = dockerignore {
                 if let Ok(rel) = path.strip_prefix(context_base) {
@@ -599,12 +740,22 @@ impl BuildEngine {
             }
 
             let file_name = entry.file_name();
-            let dest_child = dst_dir.join(file_name);
+            let dest_child = dst_dir.join(&file_name);
+            let secure_dest_child = secure_resolve_in_base(
+                guest_rootfs,
+                dest_child.strip_prefix(guest_rootfs).unwrap_or(&dest_child),
+            )?;
 
-            if path.is_dir() {
-                self.copy_dir_filtered(&path, &dest_child, context_base, dockerignore)?;
+            if file_type.is_dir() {
+                self.copy_dir_filtered(
+                    &path,
+                    &secure_dest_child,
+                    context_base,
+                    guest_rootfs,
+                    dockerignore,
+                )?;
             } else {
-                fs::copy(&path, &dest_child)?;
+                fs::copy(&path, &secure_dest_child)?;
             }
         }
         Ok(())
@@ -670,5 +821,114 @@ mod tests {
         // Verify local lookup works
         let local = try_fetch_local_tag("test-app:latest", &cache_base).unwrap();
         assert!(local.is_some());
+    }
+
+    #[test]
+    fn test_safe_normalize_relative_bounds() {
+        assert_eq!(
+            safe_normalize_relative(Path::new("a/b/c")).unwrap(),
+            PathBuf::from("a/b/c")
+        );
+        assert_eq!(
+            safe_normalize_relative(Path::new("./a/b/../c")).unwrap(),
+            PathBuf::from("a/c")
+        );
+        assert_eq!(
+            safe_normalize_relative(Path::new("/var/app")).unwrap(),
+            PathBuf::from("var/app")
+        );
+        assert!(safe_normalize_relative(Path::new("../secret")).is_err());
+        assert!(safe_normalize_relative(Path::new("a/../../secret")).is_err());
+    }
+
+    #[test]
+    fn test_secure_resolve_in_base_containment() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("base");
+        fs::create_dir_all(&base).unwrap();
+
+        // Valid inside base
+        let valid = secure_resolve_in_base(&base, Path::new("sub/file.txt")).unwrap();
+        assert!(valid.starts_with(&base));
+
+        // Traversal escaping base rejected
+        let escaping = secure_resolve_in_base(&base, Path::new("../outside.txt"));
+        assert!(escaping.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_build_engine_copy_source_traversal_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_base = temp.path().join("cache");
+        let context_dir = temp.path().join("context");
+        fs::create_dir_all(&context_dir).unwrap();
+
+        let df_content = r#"
+        FROM scratch
+        COPY ../outside.txt /app/outside.txt
+        "#;
+        fs::write(context_dir.join("Dockerfile"), df_content).unwrap();
+
+        let options = BuildOptions::new(&context_dir, &cache_base);
+        let engine = BuildEngine::new(options);
+        let result = engine.build().await;
+        assert!(result.is_err());
+        let err_msg = result.err().unwrap().to_string();
+        assert!(err_msg.contains("Path containment violation") || err_msg.contains("escapes"));
+    }
+
+    #[tokio::test]
+    async fn test_build_engine_copy_dest_traversal_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_base = temp.path().join("cache");
+        let context_dir = temp.path().join("context");
+        fs::create_dir_all(&context_dir).unwrap();
+
+        let df_content = r#"
+        FROM scratch
+        COPY hello.txt /../../outside.txt
+        "#;
+        fs::write(context_dir.join("Dockerfile"), df_content).unwrap();
+        fs::write(context_dir.join("hello.txt"), "hello").unwrap();
+
+        let options = BuildOptions::new(&context_dir, &cache_base);
+        let engine = BuildEngine::new(options);
+        let result = engine.build().await;
+        assert!(result.is_err());
+        let err_msg = result.err().unwrap().to_string();
+        assert!(err_msg.contains("Path containment violation") || err_msg.contains("escapes"));
+    }
+
+    #[tokio::test]
+    async fn test_build_engine_copy_symlink_breakout_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_base = temp.path().join("cache");
+        let context_dir = temp.path().join("context");
+        let outside_dir = temp.path().join("secret_outside");
+        fs::create_dir_all(&context_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+
+        let secret_file = outside_dir.join("token.txt");
+        fs::write(&secret_file, "super_secret").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let evil_symlink = context_dir.join("evil_link");
+            let _ = symlink(&secret_file, &evil_symlink);
+
+            let df_content = r#"
+            FROM scratch
+            COPY evil_link /app/token.txt
+            "#;
+            fs::write(context_dir.join("Dockerfile"), df_content).unwrap();
+
+            let options = BuildOptions::new(&context_dir, &cache_base);
+            let engine = BuildEngine::new(options);
+            let result = engine.build().await;
+            assert!(result.is_err());
+            let err_msg = result.err().unwrap().to_string();
+            assert!(err_msg.contains("Path containment violation") || err_msg.contains("outside"));
+        }
     }
 }

@@ -55,6 +55,7 @@ pub struct MicroVmBuilder {
     gpu_flags: Option<u32>,
     sandbox: bool,
     allow_hosts: Vec<String>,
+    default_deny: bool,
     secrets: Vec<(String, String)>,
     max_tokens: Option<u64>,
     boot_payload: Option<crate::types::BootPayload>,
@@ -108,6 +109,7 @@ impl MicroVmBuilder {
             gpu_flags: None,
             sandbox: true,
             allow_hosts: Vec::new(),
+            default_deny: false,
             secrets: Vec::new(),
             max_tokens: None,
             boot_payload: None,
@@ -220,6 +222,14 @@ impl MicroVmBuilder {
             {
                 if let Ok(mode) = balloon_str.parse() {
                     builder = builder.balloon_reporting_mode(mode);
+                }
+            }
+            if let Some(net_policy) = ann
+                .get("krun.net.policy")
+                .or_else(|| ann.get("krun.io/net-policy"))
+            {
+                if net_policy == "default-deny" || net_policy == "deny-all" {
+                    builder = builder.default_deny(true);
                 }
             }
         }
@@ -494,6 +504,12 @@ impl MicroVmBuilder {
         for h in hosts {
             self.allow_hosts.push(h.into());
         }
+        self
+    }
+
+    /// Enforces an explicit default-deny network egress policy.
+    pub fn default_deny(mut self, enabled: bool) -> Self {
+        self.default_deny = enabled;
         self
     }
 
@@ -1014,13 +1030,15 @@ impl MicroVmBuilder {
             )?;
         }
 
-        // Start host egress proxy server if filtering, secrets, token budget, or approvals are specified
+        // Start host egress proxy server if filtering, secrets, token budget, approvals, or default-deny are specified
         let (egress_proxy, proxy_port) = if !self.allow_hosts.is_empty()
+            || self.default_deny
             || !self.secrets.is_empty()
             || self.max_tokens.is_some()
             || self.approval_policy.is_some()
         {
-            let policy = crate::net::EgressPolicy::new(self.allow_hosts.clone());
+            let policy = crate::net::EgressPolicy::new(self.allow_hosts.clone())
+                .with_default_deny(self.default_deny);
             let secrets = crate::net::SecretSubstitution::new(&self.secrets);
             let budget = crate::net::LlmTokenBudget::new(self.max_tokens);
             let proxy_server =

@@ -1,6 +1,7 @@
 pub mod acceleration;
 pub mod builder;
 pub mod bundle;
+pub mod capability;
 pub mod compose;
 pub mod config;
 pub mod error;
@@ -23,6 +24,7 @@ pub use builder::{
     Instruction, LocalImageRecord, LocalImageRegistry,
 };
 pub use bundle::OciBundle;
+pub use capability::{CapabilityPolicy, FsAccessMode};
 pub use compose::{
     ComposeNetworkSpec, ComposeProject, ComposeProjectState, ComposeServiceState, ComposeSpec,
     ComposeVolumeSpec, K8sMetadata, K8sMicroVmManifest, K8sMicroVmSpec, Manifest, ServiceSpec,
@@ -42,7 +44,7 @@ pub use oci::{ArtifactMetadata, ImageReference, OciArtifact, OciClient, OciLayou
 pub use preflight::{CheckResult, Preflight};
 pub use protocol::{ControlMessage, MessagePayload, CURRENT_PROTOCOL_VERSION};
 pub use rootfs::clone_rootfs;
-pub use secrets::VaultResolver;
+pub use secrets::{CredentialScope, ScopeAuthorizer, VaultResolver};
 pub use state::{SnapshotManifest, StateManager, VmState, VmStatus};
 pub use tty::RawModeGuard;
 pub use types::{

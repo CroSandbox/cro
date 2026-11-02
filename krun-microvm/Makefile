@@ -1,4 +1,4 @@
-.PHONY: all build release test sign clean install preflight info help check clippy fmt
+.PHONY: all build release test bench sign clean install preflight info help check clippy fmt
 
 PREFIX ?= /usr/local/bin
 SUDO ?= $(shell if [ ! -w "$(PREFIX)" ] && [ "$$(id -u)" != "0" ]; then echo "sudo"; fi)
@@ -46,6 +46,9 @@ release:
 
 test:
 	cargo test --workspace
+
+bench:
+	cargo bench --workspace
 
 sign:
 	@if [ "$(OS)" = "Darwin" ]; then \

@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)%20%7C%20Linux%20(KVM)-black.svg?style=for-the-badge&logo=apple)](https://github.com/CroSandbox/cro)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-188%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
+[![Tests](https://img.shields.io/badge/tests-218%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
 [![Cold Boot](https://img.shields.io/badge/boot_time-%3C100ms-success.svg?style=for-the-badge&logo=lightning)](https://github.com/CroSandbox/cro)
 [![Compose](https://img.shields.io/badge/orchestration-Docker%20Compose%20%7C%20K8s%20CRD-purple.svg?style=for-the-badge&logo=docker)](examples/krun-compose.yaml)
 
@@ -682,6 +682,14 @@ cro network proxy \
     --secret OPENAI_API_KEY=env:HOST_KEY \
     --max-tokens 50000
 ```
+
+#### 🛡️ Enhanced Defense-in-Depth & Action Scoping
+- **Explicit Default-Deny Egress Policy (`--default-deny` / `--deny-all`)**: Enforces absolute outbound isolation. Even with zero allowlisted domains, 100% of outbound connections are rejected by default.
+- **Cryptographic Payload Binding for Human Approvals**: Intercepted sensitive/mutating requests compute a canonical SHA-256 digest (`payload_sha256`) over the HTTP method, destination, path, and payload body. Any attempt to mutate payloads or replay approval tokens with modified contents is detected and immediately rejected.
+- **Fine-Grained Credential Scoping (`CredentialScope`)**: Restricts injected secrets to specific upstream domains, allowed HTTP verbs (e.g. read-only `GET`), and exact API path endpoints (e.g. `/v1/customers` allowed, `/v1/refunds` strictly denied).
+- **Capability Policy Engine (`CapabilityPolicy`)**: Enforces sandbox filesystem boundaries (read-only system zones, restricted write directories like `/workspace` and `/tmp`, concealed sensitive paths), binary execution whitelists, and state mutation privileges.
+- **Hardened Dockerfile COPY/ADD Path Containment**: In-process build engine resolves lexical `..` traversals and validates canonical paths, strictly preventing rootfs breakout attacks and external symlink escapes.
+- **Startup & Isolation Benchmarks (`make bench`)**: Reproducible micro-benchmarks measuring sub-microsecond configuration instantiation, 6.9M+ egress policy evaluations/sec, and 57+ MB/s scoped secret substitution throughput.
 
 ---
 

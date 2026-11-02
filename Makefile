@@ -1,4 +1,4 @@
-.PHONY: all help build release test check clippy fmt sign clean install preflight info submodules libkrun libkrunfw
+.PHONY: all help build release test bench check clippy fmt sign clean install preflight info submodules libkrun libkrunfw
 
 PREFIX ?= /usr/local/bin
 WORKSPACE_DIR := $(CURDIR)/krun-microvm
@@ -13,7 +13,8 @@ help:
 	@echo "Core Targets:"
 	@echo "  make build       - Compile all SDK workspace crates (debug mode)"
 	@echo "  make release     - Compile all SDK binaries with optimizations & codesign"
-	@echo "  make test        - Run all 188+ unit & integration tests"
+	@echo "  make test        - Run all unit & integration tests"
+	@echo "  make bench       - Run reproducible startup and isolation benchmarks"
 	@echo "  make check       - Type-check all workspace crates"
 	@echo "  make clippy      - Run clippy linter with strict flags (-D warnings)"
 	@echo "  make fmt         - Check code formatting across workspace"
@@ -39,6 +40,9 @@ release:
 
 test:
 	$(MAKE) -C $(WORKSPACE_DIR) test
+
+bench:
+	$(MAKE) -C $(WORKSPACE_DIR) bench
 
 check:
 	$(MAKE) -C $(WORKSPACE_DIR) check

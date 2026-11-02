@@ -43,3 +43,11 @@ path = "../../examples/run_ai_sandbox.rs"
 [[example]]
 name = "run_mistral_inference"
 path = "../../examples/run_mistral_inference.rs"
+
+[[bench]]
+name = "startup"
+harness = false
+
+[[bench]]
+name = "isolation"
+harness = false

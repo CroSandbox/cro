@@ -9,11 +9,24 @@
 use crate::net::host_matcher::host_pattern_matches;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{oneshot, RwLock};
+
+/// Computes a canonical cryptographic SHA-256 digest of an HTTP request method, target, and payload.
+pub fn compute_payload_digest(method: &str, host: &str, path: &str, payload: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(method.as_bytes());
+    hasher.update(b" ");
+    hasher.update(host.as_bytes());
+    hasher.update(path.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(payload);
+    hex::encode(hasher.finalize())
+}
 
 /// State of an in-flight manual approval request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +52,12 @@ pub struct PendingApproval {
     pub summary: String,
     pub preview: Option<String>,
     pub status: ApprovalStatus,
+    /// Cryptographic SHA-256 digest of the request action and payload body.
+    #[serde(default)]
+    pub payload_sha256: String,
+    /// Exact byte size of the request payload.
+    #[serde(default)]
+    pub payload_size: usize,
 }
 
 /// Policy triggers that require human approval before an outbound request is forwarded.
@@ -236,10 +255,10 @@ impl ApprovalStore {
         self
     }
 
-    /// Submits a request for human approval, returning a channel receiver that completes
-    /// when approved (true) or denied/timed out (false).
+    /// Submits a request for human approval with raw payload byte binding, computing
+    /// an immutable SHA-256 digest of the request method, target host, path, and payload.
     #[allow(clippy::too_many_arguments)]
-    pub async fn submit(
+    pub async fn submit_with_payload(
         &self,
         agent_or_vm_id: impl Into<String>,
         client_addr: impl Into<String>,
@@ -247,8 +266,26 @@ impl ApprovalStore {
         host: impl Into<String>,
         port: u16,
         path: impl Into<String>,
-        preview: Option<String>,
+        payload: &[u8],
     ) -> (String, oneshot::Receiver<bool>) {
+        let preview = if !payload.is_empty() {
+            let s = String::from_utf8_lossy(payload);
+            let truncated = if s.len() > 120 {
+                format!("{}...", &s[..120])
+            } else {
+                s.to_string()
+            };
+            Some(truncated)
+        } else {
+            None
+        };
+
+        let m = method.into();
+        let h = host.into();
+        let p = path.into();
+        let payload_digest = compute_payload_digest(&m, &h, &p, payload);
+        let payload_size = payload.len();
+
         let id_num = self.id_counter.fetch_add(1, Ordering::SeqCst);
         let id = format!("appr_{:06x}", id_num);
         let now = SystemTime::now()
@@ -256,9 +293,6 @@ impl ApprovalStore {
             .unwrap_or_default()
             .as_secs();
 
-        let m = method.into();
-        let h = host.into();
-        let p = path.into();
         let summary = RequestSummarizer::summarize(&m, &h, &p, preview.as_deref());
 
         let pending_item = PendingApproval {
@@ -273,6 +307,8 @@ impl ApprovalStore {
             summary,
             preview,
             status: ApprovalStatus::Pending,
+            payload_sha256: payload_digest,
+            payload_size,
         };
 
         if let Some(ref dir) = self.storage_dir {
@@ -298,6 +334,94 @@ impl ApprovalStore {
             .insert(id.clone(), (pending_item, tx));
 
         (id, rx)
+    }
+
+    /// Submits a request for human approval, returning a channel receiver that completes
+    /// when approved (true) or denied/timed out (false).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn submit(
+        &self,
+        agent_or_vm_id: impl Into<String>,
+        client_addr: impl Into<String>,
+        method: impl Into<String>,
+        host: impl Into<String>,
+        port: u16,
+        path: impl Into<String>,
+        preview: Option<String>,
+    ) -> (String, oneshot::Receiver<bool>) {
+        let payload_bytes = preview.as_deref().map(|s| s.as_bytes()).unwrap_or(&[]);
+        self.submit_with_payload(
+            agent_or_vm_id,
+            client_addr,
+            method,
+            host,
+            port,
+            path,
+            payload_bytes,
+        )
+        .await
+    }
+
+    /// Verifies that an intercepted request matches the immutable cryptographic SHA-256 digest
+    /// that was submitted and approved by the operator.
+    pub async fn verify_payload(
+        &self,
+        id: &str,
+        method: &str,
+        host: &str,
+        path: &str,
+        current_payload: &[u8],
+    ) -> Result<()> {
+        let computed = compute_payload_digest(method, host, path, current_payload);
+        let pending = self.pending.read().await;
+        if let Some((item, _)) = pending.get(id) {
+            if !item.payload_sha256.is_empty() && item.payload_sha256 != computed {
+                bail!(
+                    "Payload integrity violation: request does not match approved digest (expected: {}, actual: {})",
+                    item.payload_sha256,
+                    computed
+                );
+            }
+            return Ok(());
+        }
+
+        // Also check history for already-approved items
+        let hist = self.history.read().await;
+        if let Some(item) = hist.iter().find(|i| i.id == id) {
+            if !item.payload_sha256.is_empty() && item.payload_sha256 != computed {
+                bail!(
+                    "Payload integrity violation: request does not match approved digest (expected: {}, actual: {})",
+                    item.payload_sha256,
+                    computed
+                );
+            }
+            return Ok(());
+        }
+
+        bail!("Approval request '{}' not found for verification", id)
+    }
+
+    /// Decides on an approval request with optional digest verification to ensure the
+    /// decision matches the exact expected payload hash.
+    pub async fn decide_with_verification(
+        &self,
+        id: &str,
+        approved: bool,
+        expected_digest: Option<&str>,
+    ) -> Result<bool> {
+        if let Some(expected) = expected_digest {
+            let pending = self.pending.read().await;
+            if let Some((item, _)) = pending.get(id) {
+                if !item.payload_sha256.is_empty() && item.payload_sha256 != expected {
+                    bail!(
+                        "Decision rejected: expected digest '{}' does not match recorded digest '{}'",
+                        expected,
+                        item.payload_sha256
+                    );
+                }
+            }
+        }
+        self.decide(id, approved).await
     }
 
     /// Decides on an approval request.
@@ -606,5 +730,97 @@ mod tests {
         let history = store.get_history().await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].status, ApprovalStatus::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn test_approval_payload_binding_and_tamper_rejection() {
+        let store = Arc::new(ApprovalStore::new());
+        let payload = b"{\"action\":\"transfer\",\"amount\":50}";
+
+        let (id, _rx) = store
+            .submit_with_payload(
+                "agent-fin",
+                "127.0.0.1",
+                "POST",
+                "bank.internal",
+                443,
+                "/api/transfer",
+                payload,
+            )
+            .await;
+
+        let pending = store.list_pending().await;
+        assert_eq!(pending.len(), 1);
+        assert!(!pending[0].payload_sha256.is_empty());
+        assert_eq!(pending[0].payload_size, payload.len());
+
+        // Exact match passes verification
+        assert!(store
+            .verify_payload(&id, "POST", "bank.internal", "/api/transfer", payload)
+            .await
+            .is_ok());
+
+        // Tampered payload body fails verification
+        let tampered_payload = b"{\"action\":\"transfer\",\"amount\":500000}";
+        let res_tampered = store
+            .verify_payload(
+                &id,
+                "POST",
+                "bank.internal",
+                "/api/transfer",
+                tampered_payload,
+            )
+            .await;
+        assert!(res_tampered.is_err());
+        assert!(res_tampered
+            .unwrap_err()
+            .to_string()
+            .contains("Payload integrity violation"));
+
+        // Tampered method or path fails verification
+        let res_method = store
+            .verify_payload(&id, "DELETE", "bank.internal", "/api/transfer", payload)
+            .await;
+        assert!(res_method.is_err());
+
+        let res_path = store
+            .verify_payload(&id, "POST", "bank.internal", "/api/transfer/all", payload)
+            .await;
+        assert!(res_path.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_decide_with_digest_verification() {
+        let store = Arc::new(ApprovalStore::new());
+        let payload = b"{\"refund_id\":\"ref_123\"}";
+
+        let (id, rx) = store
+            .submit_with_payload(
+                "agent-stripe",
+                "127.0.0.1",
+                "POST",
+                "api.stripe.com",
+                443,
+                "/v1/refunds",
+                payload,
+            )
+            .await;
+
+        let digest = compute_payload_digest("POST", "api.stripe.com", "/v1/refunds", payload);
+
+        // Mismatched expected digest rejected
+        let bad_digest_res = store
+            .decide_with_verification(&id, true, Some("0000000000000000"))
+            .await;
+        assert!(bad_digest_res.is_err());
+
+        // Matching digest succeeds
+        let ok_res = store
+            .decide_with_verification(&id, true, Some(&digest))
+            .await;
+        assert!(ok_res.is_ok());
+        assert!(ok_res.unwrap());
+
+        assert!(rx.await.unwrap());
     }
 }

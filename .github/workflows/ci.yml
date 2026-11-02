@@ -15,12 +15,9 @@ concurrency:
 
 # ---------------------------------------------------------------------------
 #  Shared environment
-#  FORCE_LIBKRUN_STUB: compile the lightweight C stub instead of requiring
-#  the real libkrun native library, which is not available in CI runners.
 # ---------------------------------------------------------------------------
 env:
   CARGO_TERM_COLOR: always
-  FORCE_LIBKRUN_STUB: "1"
   RUST_BACKTRACE: "1"
 
 jobs:
@@ -43,19 +40,20 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt
-          # Disable the built-in Cargo cache; we don't compile here.
           cache: false
 
       - name: Check code formatting
         run: cargo fmt --all --check
 
   # =========================================================================
-  #  Clippy — needs full deps (Go, protoc) to compile FFI crates
+  #  Clippy — Fast linting gate with C stub
   # =========================================================================
   clippy:
-    name: Clippy Lints
+    name: Clippy Lints (Stub)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      FORCE_LIBKRUN_STUB: "1"
     defaults:
       run:
         working-directory: krun-microvm
@@ -86,17 +84,23 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   # =========================================================================
-  #  Test Suite
+  #  Test Suite — Separated between Stub CI on Linux and Native on macOS
   # =========================================================================
   test:
-    name: Tests (${{ matrix.os }})
+    name: Tests (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     needs: [fmt]
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        include:
+          - name: Linux (Stub)
+            os: ubuntu-latest
+            use_stub: "1"
+          - name: macOS (Native libkrun)
+            os: macos-14
+            use_stub: "0"
     defaults:
       run:
         working-directory: krun-microvm
@@ -123,18 +127,23 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends protobuf-compiler
 
-      - name: Install system dependencies (macOS)
+      - name: Install system dependencies and native libkrun (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf
+        run: |
+          brew install protobuf
+          brew tap slp/krun
+          brew install libkrun
 
       - name: Run test suite
+        env:
+          FORCE_LIBKRUN_STUB: ${{ matrix.use_stub }}
         run: cargo test --workspace --verbose
 
   # =========================================================================
-  #  Build Release Binaries
+  #  Build Release Binaries (Strictly Native — No Stubs)
   # =========================================================================
   build-release:
-    name: Build (${{ matrix.artifact_name }})
+    name: Release Build (${{ matrix.artifact_name }})
     runs-on: ${{ matrix.os }}
     needs: [clippy, test]
     timeout-minutes: 30
@@ -169,18 +178,33 @@ jobs:
           go-version: "stable"
           cache-dependency-path: krun-microvm/crates/libgvproxy-sys/gvproxy-bridge/go.sum
 
-      - name: Install system dependencies (Linux)
+      - name: Install system dependencies and build libkrun (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends protobuf-compiler
+          sudo apt-get install -y --no-install-recommends protobuf-compiler libepoxy-dev libgbm-dev
+          # Build real libkrun submodule for native release linking
+          if [ -d "../libkrun" ]; then
+            make -C ../libkrun || true
+          fi
 
-      - name: Install system dependencies (macOS)
+      - name: Install system dependencies and native libkrun (macOS)
         if: runner.os == 'macOS'
-        run: brew install protobuf
+        run: |
+          brew install protobuf
+          brew tap slp/krun
+          brew install libkrun
 
-      - name: Build release binaries
+      - name: Build release binaries (Real libkrun)
         run: cargo build --workspace --release --target ${{ matrix.target }}
+
+      - name: Verify release binary links to real libkrun (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          otool -L target/${{ matrix.target }}/release/microvm | grep -E "libkrun(\.dylib)?" || {
+            echo "ERROR: Release binary does not link against real libkrun dynamic library!";
+            exit 1;
+          }
 
       - name: Package release bundle
         run: |
