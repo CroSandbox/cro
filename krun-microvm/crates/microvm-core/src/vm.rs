@@ -67,6 +67,7 @@ pub struct MicroVmBuilder {
     approval_store: Option<std::sync::Arc<crate::net::ApprovalStore>>,
     fs_overlays: Vec<crate::types::FsOverlayEntry>,
     smbios_oem_strings: Vec<String>,
+    balloon_reporting_mode: Option<crate::types::FreePageReportingMode>,
 }
 
 impl MicroVmBuilder {
@@ -119,9 +120,9 @@ impl MicroVmBuilder {
             approval_store: None,
             fs_overlays: Vec::new(),
             smbios_oem_strings: Vec::new(),
+            balloon_reporting_mode: None,
         }
     }
-
 
     /// Creates a MicroVmBuilder from an unpacked OCI runtime bundle directory (containing config.json and rootfs/).
     pub fn from_bundle(bundle_dir: impl AsRef<Path>) -> Result<Self> {
@@ -213,6 +214,14 @@ impl MicroVmBuilder {
                     builder = builder.sandbox(false);
                 }
             }
+            if let Some(balloon_str) = ann
+                .get("krun.balloon.reporting")
+                .or_else(|| ann.get("krun.io/balloon-reporting"))
+            {
+                if let Ok(mode) = balloon_str.parse() {
+                    builder = builder.balloon_reporting_mode(mode);
+                }
+            }
         }
         builder.rootfs_override = Some(bundle.rootfs_path);
         builder.bundle_dir = Some(bundle.bundle_dir);
@@ -256,6 +265,16 @@ impl MicroVmBuilder {
 
     pub fn virtiofs_mounts(mut self, mounts: Vec<VirtioFsMount>) -> Self {
         self.virtiofs_mounts.extend(mounts);
+        self
+    }
+
+    pub fn virtiofs_mount(mut self, mount: VirtioFsMount) -> Self {
+        self.virtiofs_mounts.push(mount);
+        self
+    }
+
+    pub fn balloon_reporting_mode(mut self, mode: crate::types::FreePageReportingMode) -> Self {
+        self.balloon_reporting_mode = Some(mode);
         self
     }
 
@@ -1123,6 +1142,7 @@ impl MicroVmBuilder {
             supervisor_sock_path: Some(supervisor_sock.clone()),
             fs_overlays: self.fs_overlays.clone(),
             smbios_oem_strings: self.smbios_oem_strings.clone(),
+            balloon_reporting_mode: self.balloon_reporting_mode,
         };
 
         let runner_cfg_path = instance_dir.join("runner_config.json");

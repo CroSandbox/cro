@@ -13,7 +13,7 @@ help:
 	@echo "Core Targets:"
 	@echo "  make build       - Compile all SDK workspace crates (debug mode)"
 	@echo "  make release     - Compile all SDK binaries with optimizations & codesign"
-	@echo "  make test        - Run all 184+ unit & integration tests"
+	@echo "  make test        - Run all 188+ unit & integration tests"
 	@echo "  make check       - Type-check all workspace crates"
 	@echo "  make clippy      - Run clippy linter with strict flags (-D warnings)"
 	@echo "  make fmt         - Check code formatting across workspace"

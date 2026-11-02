@@ -26,7 +26,6 @@ impl Preflight {
         results
     }
 
-
     pub fn check_hypervisor_capabilities() -> CheckResult {
         let max_vcpus = krun_sys::get_max_vcpus().unwrap_or(0);
         let has_net = krun_sys::has_feature(krun_sys::features::KRUN_FEATURE_NET);
@@ -62,7 +61,6 @@ impl Preflight {
             ),
         }
     }
-
 
     pub fn check_hypervisor_toolchain() -> CheckResult {
         #[cfg(target_os = "macos")]

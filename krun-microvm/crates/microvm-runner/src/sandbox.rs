@@ -209,6 +209,7 @@ mod tests {
             supervisor_sock_path: None,
             fs_overlays: vec![],
             smbios_oem_strings: vec![],
+            balloon_reporting_mode: None,
         };
 
         assert!(apply_sandbox(&cfg).is_ok());
@@ -252,6 +253,7 @@ mod tests {
             supervisor_sock_path: None,
             fs_overlays: vec![],
             smbios_oem_strings: vec![],
+            balloon_reporting_mode: None,
         };
 
         assert!(apply_sandbox(&cfg).is_ok());

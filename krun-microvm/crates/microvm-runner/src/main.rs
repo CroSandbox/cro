@@ -146,22 +146,40 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
     for disk in &cfg.disks {
         let format = disk.format as u32;
         let sync_mode = disk.sync_mode as u32;
-        ctx.add_disk3(
-            &disk.id,
-            &disk.path,
-            format,
-            disk.read_only,
-            disk.direct_io,
-            sync_mode,
-        )
-        .with_context(|| {
-            format!(
-                "Failed to add block disk '{}' (format: {:?}, sync: {:?})",
-                disk.id, disk.format, disk.sync_mode
+        if disk.parallel_reads || disk.read_pool_size.is_some() {
+            ctx.add_disk4(
+                &disk.id,
+                &disk.path,
+                format,
+                disk.read_only,
+                disk.direct_io,
+                sync_mode,
+                disk.parallel_reads,
+                disk.read_pool_size.unwrap_or(0),
             )
-        })?;
+            .with_context(|| {
+                format!(
+                    "Failed to add block disk '{}' with parallel reads (format: {:?}, sync: {:?}, pool: {:?})",
+                    disk.id, disk.format, disk.sync_mode, disk.read_pool_size
+                )
+            })?;
+        } else {
+            ctx.add_disk3(
+                &disk.id,
+                &disk.path,
+                format,
+                disk.read_only,
+                disk.direct_io,
+                sync_mode,
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to add block disk '{}' (format: {:?}, sync: {:?})",
+                    disk.id, disk.format, disk.sync_mode
+                )
+            })?;
+        }
     }
-
 
     // Configure boot payload: OCI Rootfs, Direct Kernel, UEFI Firmware, or Unikernel
     match cfg.boot_payload.as_ref() {
@@ -292,7 +310,10 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
 
     // Configure virtio-fs directory shares with DAX support
     for mount in &cfg.virtiofs_mounts {
-        let dax = mount.dax_window_size_bytes.or(cfg.dax_window_size_bytes).unwrap_or(0);
+        let dax = mount
+            .dax_window_size_bytes
+            .or(cfg.dax_window_size_bytes)
+            .unwrap_or(0);
         if dax > 0 {
             eprintln!(
                 "[microvm-runner] Enabled VirtioFS DAX window for '{}' ({} MB)",
@@ -300,8 +321,38 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
                 dax / (1024 * 1024)
             );
         }
-        ctx.add_virtiofs3(&mount.tag, &mount.path, dax, mount.read_only)
-            .with_context(|| format!("Failed to add virtiofs mount '{}'", mount.tag))?;
+        if mount.cache_policy.is_some() || mount.permission_semantics.is_some() {
+            let cache_policy = mount.cache_policy.unwrap_or_default().to_krun_sys();
+            let perm = mount.permission_semantics.unwrap_or_default().to_krun_sys();
+            ctx.add_virtiofs4(
+                &mount.tag,
+                &mount.path,
+                dax,
+                mount.read_only,
+                cache_policy,
+                perm,
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to add virtiofs mount '{}' (cache: {:?}, permissions: {:?})",
+                    mount.tag, mount.cache_policy, mount.permission_semantics
+                )
+            })?;
+        } else {
+            ctx.add_virtiofs3(&mount.tag, &mount.path, dax, mount.read_only)
+                .with_context(|| format!("Failed to add virtiofs mount '{}'", mount.tag))?;
+        }
+    }
+
+    // Configure balloon free page reporting mode if specified
+    if let Some(mode) = cfg.balloon_reporting_mode {
+        ctx.set_balloon_free_page_reporting_mode(mode.to_krun_sys())
+            .with_context(|| {
+                format!(
+                    "Failed to set balloon free page reporting mode to {:?}",
+                    mode
+                )
+            })?;
     }
 
     // Configure in-memory virtual filesystem overlays
@@ -321,7 +372,6 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
         ctx.set_smbios_oem_strings(&cfg.smbios_oem_strings)
             .context("Failed to configure SMBIOS OEM strings")?;
     }
-
 
     // Configure optional console output logging
     if let Some(ref log_path) = cfg.console_log_path {

@@ -61,6 +61,39 @@ fn test_cli_parse_egress_and_secrets() {
 }
 
 #[test]
+fn test_cli_parse_disk_parallel_reads_and_fs_options() {
+    let args = vec![
+        "microvm",
+        "run",
+        "--disk",
+        "/var/lib/disk.raw",
+        "--disk-parallel-reads",
+        "--disk-read-pool-size",
+        "16",
+        "--fs-cache",
+        "always",
+        "--fs-permissions",
+        "simplified",
+        "--balloon-reporting",
+        "replace",
+        "ubuntu:24.04",
+    ];
+    let cli = Cli::try_parse_from(args).unwrap();
+    match cli.command {
+        Commands::Run(run) => {
+            assert_eq!(run.disks, vec!["/var/lib/disk.raw"]);
+            assert!(run.disk_parallel_reads);
+            assert_eq!(run.disk_read_pool_size, Some(16));
+            assert_eq!(run.fs_cache, Some("always".to_string()));
+            assert_eq!(run.fs_permissions, Some("simplified".to_string()));
+            assert_eq!(run.balloon_reporting, Some("replace".to_string()));
+            assert_eq!(run.image, "ubuntu:24.04");
+        }
+        _ => panic!("Expected Commands::Run"),
+    }
+}
+
+#[test]
 fn test_parse_secret_arg() {
     // Direct value
     let (k, v) = parse_secret_arg("FOO=bar").unwrap();

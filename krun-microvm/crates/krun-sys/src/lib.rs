@@ -37,12 +37,18 @@ pub enum KrunError {
     AddDisk(i32),
     #[error("Failed to add disk3, error code: {0}")]
     AddDisk3(i32),
+    #[error("Failed to add disk4 with parallel reads, error code: {0}")]
+    AddDisk4(i32),
     #[error("Failed to add virtiofs3, error code: {0}")]
     AddVirtioFs3(i32),
+    #[error("Failed to add virtiofs4 with cache and permissions, error code: {0}")]
+    AddVirtioFs4(i32),
     #[error("Failed to add fs overlay file, error code: {0}")]
     AddFsOverlayFile(i32),
     #[error("Failed to add fs overlay dir, error code: {0}")]
     AddFsOverlayDir(i32),
+    #[error("Failed to set balloon free page reporting mode, error code: {0}")]
+    SetFreePageReportingMode(i32),
     #[error("Failed to get shutdown eventfd, error code: {0}")]
     GetShutdownEventfd(i32),
     #[error("Failed to set SMBIOS OEM strings, error code: {0}")]
@@ -95,6 +101,24 @@ pub mod features {
     pub const KRUN_FEATURE_AMD_SEV: u64 = 7;
     pub const KRUN_FEATURE_INTEL_TDX: u64 = 8;
     pub const KRUN_FEATURE_AWS_NITRO: u64 = 9;
+    pub const KRUN_FEATURE_RTC: u64 = 10;
+    pub const KRUN_FEATURE_PCI: u64 = 11;
+}
+
+pub mod cache_policies {
+    pub const KRUN_CACHE_POLICY_NEVER: u32 = 0;
+    pub const KRUN_CACHE_POLICY_AUTO: u32 = 1;
+    pub const KRUN_CACHE_POLICY_ALWAYS: u32 = 2;
+}
+
+pub mod permission_semantics {
+    pub const KRUN_PERMISSION_SEMANTICS_LINUX_COMPLETE: u32 = 0;
+    pub const KRUN_PERMISSION_SEMANTICS_LINUX_SIMPLIFIED: u32 = 1;
+}
+
+pub mod free_page_reporting_modes {
+    pub const KRUN_FREE_PAGE_REPORTING_MODE_DEFAULT: u32 = 0;
+    pub const KRUN_FREE_PAGE_REPORTING_MODE_REPLACE: u32 = 1;
 }
 
 pub mod net_flags {
@@ -148,6 +172,17 @@ pub mod ffi {
             direct_io: bool,
             sync_mode: u32,
         ) -> i32;
+        pub fn krun_add_disk4(
+            ctx_id: u32,
+            block_id: *const c_char,
+            disk_path: *const c_char,
+            disk_format: u32,
+            read_only: bool,
+            direct_io: bool,
+            sync_mode: u32,
+            parallel_reads: bool,
+            read_pool_size: usize,
+        ) -> i32;
         pub fn krun_set_kernel(
             ctx_id: u32,
             kernel_path: *const c_char,
@@ -187,6 +222,16 @@ pub mod ffi {
             shm_size: u64,
             read_only: bool,
         ) -> i32;
+        pub fn krun_add_virtiofs4(
+            ctx_id: u32,
+            tag: *const c_char,
+            path: *const c_char,
+            shm_size: u64,
+            read_only: bool,
+            cache_policy: u32,
+            permission_semantics: u32,
+        ) -> i32;
+        pub fn krun_set_balloon_free_page_reporting_mode(ctx_id: u32, mode: u32) -> i32;
         pub fn krun_fs_add_overlay_file(
             ctx_id: u32,
             fs_tag: *const c_char,
@@ -203,10 +248,7 @@ pub mod ffi {
             mode: u32,
         ) -> i32;
         pub fn krun_get_shutdown_eventfd(ctx_id: u32) -> i32;
-        pub fn krun_set_smbios_oem_strings(
-            ctx_id: u32,
-            oem_strings: *const *const c_char,
-        ) -> i32;
+        pub fn krun_set_smbios_oem_strings(ctx_id: u32, oem_strings: *const *const c_char) -> i32;
         pub fn krun_has_feature(feature: u64) -> i32;
         pub fn krun_get_max_vcpus() -> i32;
         pub fn krun_add_net_unixstream(
@@ -222,7 +264,6 @@ pub mod ffi {
         pub fn krun_start_enter(ctx_id: u32) -> i32;
     }
 }
-
 
 pub fn set_log_level(level: u32) -> Result<(), KrunError> {
     let rc = unsafe { ffi::krun_set_log_level(level) };
@@ -607,6 +648,43 @@ impl KrunContext {
         Ok(())
     }
 
+    /// Adds a block disk with full format, direct I/O, sync mode, and parallel reads configuration.
+    ///
+    /// When `parallel_reads` is true, read requests can be processed concurrently.
+    /// `read_pool_size` sets the worker thread pool size for reads (0 for default pool size).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_disk4<P: AsRef<Path>>(
+        &mut self,
+        block_id: &str,
+        disk_path: P,
+        format: u32,
+        read_only: bool,
+        direct_io: bool,
+        sync_mode: u32,
+        parallel_reads: bool,
+        read_pool_size: usize,
+    ) -> Result<(), KrunError> {
+        let c_id = CString::new(block_id)?;
+        let c_path = path_to_cstring(disk_path.as_ref())?;
+        let rc = unsafe {
+            ffi::krun_add_disk4(
+                self.ctx_id,
+                c_id.as_ptr(),
+                c_path.as_ptr(),
+                format,
+                read_only,
+                direct_io,
+                sync_mode,
+                parallel_reads,
+                read_pool_size,
+            )
+        };
+        if rc != 0 {
+            return Err(KrunError::AddDisk4(rc));
+        }
+        Ok(())
+    }
+
     /// Adds an independent virtio-fs device with a configurable DAX shared memory window.
     pub fn add_virtiofs3<P: AsRef<Path>>(
         &mut self,
@@ -628,6 +706,36 @@ impl KrunContext {
         };
         if rc != 0 {
             return Err(KrunError::AddVirtioFs3(rc));
+        }
+        Ok(())
+    }
+
+    /// Adds an independent virtio-fs device with a configurable DAX shared memory window,
+    /// cache policy, and POSIX permission semantics.
+    pub fn add_virtiofs4<P: AsRef<Path>>(
+        &mut self,
+        tag: &str,
+        path: P,
+        shm_size: u64,
+        read_only: bool,
+        cache_policy: u32,
+        permission_semantics: u32,
+    ) -> Result<(), KrunError> {
+        let c_tag = CString::new(tag)?;
+        let c_path = path_to_cstring(path.as_ref())?;
+        let rc = unsafe {
+            ffi::krun_add_virtiofs4(
+                self.ctx_id,
+                c_tag.as_ptr(),
+                c_path.as_ptr(),
+                shm_size,
+                read_only,
+                cache_policy,
+                permission_semantics,
+            )
+        };
+        if rc != 0 {
+            return Err(KrunError::AddVirtioFs4(rc));
         }
         Ok(())
     }
@@ -692,6 +800,19 @@ impl KrunContext {
         let rc = unsafe { ffi::krun_set_smbios_oem_strings(self.ctx_id, ptrs.as_ptr()) };
         if rc != 0 {
             return Err(KrunError::SetSmbiosOemStrings(rc));
+        }
+        Ok(())
+    }
+
+    /// Configures the memory balloon free page reporting mode.
+    ///
+    /// Modes:
+    /// - `free_page_reporting_modes::DEFAULT` (0): standard balloon behavior
+    /// - `free_page_reporting_modes::REPLACE` (1): host reclamation of guest freed pages
+    pub fn set_balloon_free_page_reporting_mode(&mut self, mode: u32) -> Result<(), KrunError> {
+        let rc = unsafe { ffi::krun_set_balloon_free_page_reporting_mode(self.ctx_id, mode) };
+        if rc != 0 {
+            return Err(KrunError::SetFreePageReportingMode(rc));
         }
         Ok(())
     }
@@ -769,6 +890,46 @@ mod tests {
         assert_eq!(features::KRUN_FEATURE_NET, 0);
         assert_eq!(features::KRUN_FEATURE_BLK, 1);
         assert_eq!(features::KRUN_FEATURE_GPU, 2);
+        assert_eq!(features::KRUN_FEATURE_RTC, 10);
+        assert_eq!(features::KRUN_FEATURE_PCI, 11);
+
+        assert_eq!(cache_policies::KRUN_CACHE_POLICY_NEVER, 0);
+        assert_eq!(cache_policies::KRUN_CACHE_POLICY_AUTO, 1);
+        assert_eq!(cache_policies::KRUN_CACHE_POLICY_ALWAYS, 2);
+
+        assert_eq!(
+            permission_semantics::KRUN_PERMISSION_SEMANTICS_LINUX_COMPLETE,
+            0
+        );
+        assert_eq!(
+            permission_semantics::KRUN_PERMISSION_SEMANTICS_LINUX_SIMPLIFIED,
+            1
+        );
+
+        assert_eq!(
+            free_page_reporting_modes::KRUN_FREE_PAGE_REPORTING_MODE_DEFAULT,
+            0
+        );
+        assert_eq!(
+            free_page_reporting_modes::KRUN_FREE_PAGE_REPORTING_MODE_REPLACE,
+            1
+        );
+    }
+
+    #[test]
+    fn test_error_display() {
+        assert_eq!(
+            format!("{}", KrunError::AddDisk4(-5)),
+            "Failed to add disk4 with parallel reads, error code: -5"
+        );
+        assert_eq!(
+            format!("{}", KrunError::AddVirtioFs4(-6)),
+            "Failed to add virtiofs4 with cache and permissions, error code: -6"
+        );
+        assert_eq!(
+            format!("{}", KrunError::SetFreePageReportingMode(-7)),
+            "Failed to set balloon free page reporting mode, error code: -7"
+        );
     }
 
     #[test]

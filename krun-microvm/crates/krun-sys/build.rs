@@ -19,9 +19,19 @@ fn detect_libkrun() -> LibKrunVariant {
         }
     }
 
-    // 2. Local submodule build in workspace (e.g. libkrun/target/release)
+    // 2. pkg-config detection (supports /usr/local/lib/pkgconfig, Homebrew, distribution paths)
+    if pkg_config::Config::new().probe("libkrun").is_ok() {
+        return LibKrunVariant::PkgConfig;
+    }
+    if pkg_config::Config::new().probe("libkrun-efi").is_ok() {
+        return LibKrunVariant::PkgConfig;
+    }
+
+    // 3. Local submodule build in workspace (e.g. libkrun/target/release)
     if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
         let submodule_candidates = [
+            PathBuf::from(&manifest_dir).join("../../../libkrun/target/release"),
+            PathBuf::from(&manifest_dir).join("../../../libkrun/target/debug"),
             PathBuf::from(&manifest_dir).join("../../libkrun/target/release"),
             PathBuf::from(&manifest_dir).join("../../libkrun/target/debug"),
         ];
@@ -32,14 +42,6 @@ fn detect_libkrun() -> LibKrunVariant {
                 }
             }
         }
-    }
-
-    // 3. pkg-config detection (supports /usr/local/lib/pkgconfig, Homebrew, distribution paths)
-    if pkg_config::Config::new().probe("libkrun").is_ok() {
-        return LibKrunVariant::PkgConfig;
-    }
-    if pkg_config::Config::new().probe("libkrun-efi").is_ok() {
-        return LibKrunVariant::PkgConfig;
     }
 
     // 4. Standard filesystem candidate search paths
@@ -80,6 +82,7 @@ fn detect_libkrun() -> LibKrunVariant {
 
 fn main() {
     println!("cargo:rerun-if-changed=stub.c");
+    println!("cargo:rerun-if-changed=compat.c");
     println!("cargo:rerun-if-env-changed=LIBKRUN_DIR");
     println!("cargo:rerun-if-env-changed=FORCE_LIBKRUN_STUB");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
@@ -95,15 +98,18 @@ fn main() {
         LibKrunVariant::Krun(custom_dir) => {
             println!("cargo:rustc-link-lib=dylib=krun");
             add_search_paths(custom_dir.as_deref());
+            cc::Build::new().file("compat.c").compile("krun_compat");
         }
         LibKrunVariant::KrunEfi(custom_dir) => {
             println!("cargo:rustc-link-lib=dylib=krun-efi");
             add_search_paths(custom_dir.as_deref());
+            cc::Build::new().file("compat.c").compile("krun_compat");
         }
         LibKrunVariant::PkgConfig => {
             // pkg_config has already emitted link-lib and search paths.
             // Add standard rpaths to ensure runtime dlopen succeeds.
             add_standard_rpaths();
+            cc::Build::new().file("compat.c").compile("krun_compat");
         }
         LibKrunVariant::None => {
             println!("cargo:warning=libkrun native library not found; compiling fallback stub for test/CI compatibility");

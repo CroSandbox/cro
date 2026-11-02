@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)%20%7C%20Linux%20(KVM)-black.svg?style=for-the-badge&logo=apple)](https://github.com/CroSandbox/cro)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-184%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
+[![Tests](https://img.shields.io/badge/tests-188%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
 [![Cold Boot](https://img.shields.io/badge/boot_time-%3C100ms-success.svg?style=for-the-badge&logo=lightning)](https://github.com/CroSandbox/cro)
 [![Compose](https://img.shields.io/badge/orchestration-Docker%20Compose%20%7C%20K8s%20CRD-purple.svg?style=for-the-badge&logo=docker)](examples/krun-compose.yaml)
 
@@ -48,7 +48,7 @@ cro run alpine:latest -- echo "🚀 Hello from cro microVM!"
 
 # Check guest Linux kernel (running isolated on macOS Apple Silicon or Linux KVM):
 cro run alpine:latest -- uname -a
-# Linux localhost 6.12.91 #1 SMP aarch64 Linux
+# Linux localhost 6.12.109 #1 SMP aarch64 Linux (libkrunfw v5.6.2)
 ```
 
 ### 3. Deploy Multi-Service Stacks with Docker Compose
@@ -501,11 +501,16 @@ cro run --shm-size 512m mcr.microsoft.com/playwright:v1.45.0
 Powered by `libkrun v2` extensions, `cro` provides native enterprise block device virtualization and high-throughput shared memory windows:
 
 ```bash
-# 💽 Attach high-capacity QCOW2 or VMDK virtual disks with macOS relaxed sync:
+# 💽 Attach high-capacity QCOW2 or VMDK virtual disks with parallel reads & macOS relaxed sync:
 cro run \
     --disk ./database.qcow2 \
     --disk backup:./backup.vmdk:ro \
+    --disk-parallel-reads \
+    --disk-read-pool-size 16 \
     --dax 4G \
+    --fs-cache always \
+    --fs-permissions complete \
+    --balloon-reporting replace \
     ubuntu:24.04
 
 # ⚡ Instant on-demand container streaming with Dragonfly Nydus RAFSv6:
@@ -517,7 +522,10 @@ cro run \
 ```
 
 - **Universal Multi-Format Block Devices**: Full native support for raw disk images, QCOW2 (QEMU Copy-on-Write v2/v3), and VMDK (VMware Virtual Machine Disk). `cro` automatically identifies the format by file extension and magic headers.
+- **Concurrent Block Device Reads**: `--disk-parallel-reads` with configurable worker pool size (`--disk-read-pool-size <N>`) services concurrent guest I/O requests simultaneously without head-of-line blocking.
 - **macOS Relaxed Disk Syncing (`F_BARRIERFSYNC`)**: Default block device mode utilizes relaxed barrier syncing (`DiskSyncMode::Relaxed`) on Apple Silicon APFS to avoid disk flush bottlenecks while preserving metadata consistency.
+- **VirtioFS Cache & Permission Semantics**: Fine-grained host filesystem caching via `--fs-cache <never|auto|always>` and POSIX permission compliance control via `--fs-permissions <complete|simplified>`.
+- **macOS Memory Balloon Host Reclamation**: `--balloon-reporting replace` dynamically returns guest freed memory pages directly back to the macOS host Virtual Memory subsystem via `mach_vm_deallocate` / `madvise`.
 - **Orderly ACPI/GPIO EventFd Shutdown**: Clean eventfd-based poweroff interrupts allow guest kernels to gracefully sync file systems and unmount before hypervisor termination.
 - **VirtioFS DAX Zero-Copy Window**: Direct access memory mapping (`--dax <size>`) maps LLM weights (GGUF, Safetensors) directly into the guest address space with zero memory duplication.
 - **In-Memory File Overlays**: Seamless zero-disk injection of system configuration files (`/etc/hosts`, `/etc/resolv.conf`, network credentials) via `one_shot` virtual entries.
@@ -876,6 +884,12 @@ cro run -p 8080:80 nginx:alpine
 # Attach block disk image (auto format detection: RAW, QCOW2, VMDK):
 cro run --disk ./database.qcow2 --disk backup:./backup.vmdk:ro alpine:latest
 
+# High-performance parallel reads with custom worker pool on attached disks:
+cro run --disk ./database.qcow2 --disk-parallel-reads --disk-read-pool-size 16 alpine:latest
+
+# VirtioFS with fine-grained cache policy, permission semantics, and host memory reclamation:
+cro run -v /data:data --fs-cache always --fs-permissions complete --balloon-reporting replace ubuntu:24.04
+
 # Direct memory-mapped VirtioFS DAX window for zero-copy file sharing:
 cro run --dax 4G alpine:latest
 
@@ -1214,7 +1228,7 @@ make build
 # Sign binaries with macOS Hypervisor entitlement:
 make sign
 
-# Run all 184+ automated unit and integration tests:
+# Run all 188+ automated unit and integration tests:
 make test
 
 # Type-check, lint, and formatting verification:

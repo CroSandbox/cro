@@ -52,7 +52,6 @@ impl SupervisorServer {
         })
     }
 
-
     /// Emits a `Booted` lifecycle event to the connected parent.
     pub fn emit_booted(&self) {
         if let Ok(guard) = self.active_stream.lock() {
@@ -268,4 +267,3 @@ fn handle_client_connection(stream: &mut UnixStream, shutdown_efd: Option<i32>) 
         }
     }
 }
-

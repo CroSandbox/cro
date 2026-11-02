@@ -1097,6 +1097,7 @@ mod tests {
             supervisor_sock_path: None,
             fs_overlays: vec![],
             smbios_oem_strings: vec![],
+            balloon_reporting_mode: None,
         };
         fs::write(
             instance_dir.join("runner_config.json"),

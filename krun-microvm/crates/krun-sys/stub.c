@@ -177,8 +177,41 @@ int krun_add_disk3(unsigned int ctx_id, const char *block_id, const char *disk_p
     return 0;
 }
 
+int krun_add_disk4(
+    unsigned int ctx_id,
+    const char *block_id,
+    const char *disk_path,
+    unsigned int disk_format,
+    _Bool read_only,
+    _Bool direct_io,
+    unsigned int sync_mode,
+    _Bool parallel_reads,
+    unsigned long read_pool_size
+) {
+    (void)ctx_id; (void)block_id; (void)disk_path; (void)disk_format; (void)read_only; (void)direct_io; (void)sync_mode; (void)parallel_reads; (void)read_pool_size;
+    return 0;
+}
+
 int krun_add_virtiofs3(unsigned int ctx_id, const char *tag, const char *path, unsigned long long shm_size, _Bool read_only) {
     (void)ctx_id; (void)tag; (void)path; (void)shm_size; (void)read_only;
+    return 0;
+}
+
+int krun_add_virtiofs4(
+    unsigned int ctx_id,
+    const char *tag,
+    const char *path,
+    unsigned long long shm_size,
+    _Bool read_only,
+    unsigned int cache_policy,
+    unsigned int permission_semantics
+) {
+    (void)ctx_id; (void)tag; (void)path; (void)shm_size; (void)read_only; (void)cache_policy; (void)permission_semantics;
+    return 0;
+}
+
+int krun_set_balloon_free_page_reporting_mode(unsigned int ctx_id, unsigned int mode) {
+    (void)ctx_id; (void)mode;
     return 0;
 }
 

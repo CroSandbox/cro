@@ -54,6 +54,11 @@ pub async fn handle_run(run: RunArgs) -> Result<()> {
         cmdline,
         firmware,
         disks,
+        fs_cache,
+        fs_permissions,
+        disk_parallel_reads,
+        disk_read_pool_size,
+        balloon_reporting,
         shm_size,
         cmd,
         file,
@@ -102,7 +107,20 @@ pub async fn handle_run(run: RunArgs) -> Result<()> {
 
     for (i, d) in disks.iter().enumerate() {
         let (id, path, ro) = parse_disk_arg(d, i);
-        builder = builder.disk(id, path, ro);
+        let mut attachment = microvm_core::types::DiskAttachment::new(id, path, ro);
+        if disk_parallel_reads {
+            attachment = attachment.with_parallel_reads(true);
+        }
+        if let Some(pool_sz) = disk_read_pool_size {
+            attachment = attachment.with_read_pool_size(pool_sz);
+        }
+        builder = builder.disk_attachment(attachment);
+    }
+
+    if let Some(ref br) = balloon_reporting {
+        let mode: microvm_core::types::FreePageReportingMode =
+            br.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+        builder = builder.balloon_reporting_mode(mode);
     }
 
     builder = builder
@@ -219,6 +237,16 @@ pub async fn handle_run(run: RunArgs) -> Result<()> {
         builder = builder.port_forward(host, guest);
     }
 
+    let parsed_cache: Option<microvm_core::types::VirtioFsCachePolicy> = match fs_cache.as_deref() {
+        Some(s) => Some(s.parse().map_err(|e: String| anyhow::anyhow!(e))?),
+        None => None,
+    };
+    let parsed_perms: Option<microvm_core::types::VirtioFsPermissionSemantics> =
+        match fs_permissions.as_deref() {
+            Some(s) => Some(s.parse().map_err(|e: String| anyhow::anyhow!(e))?),
+            None => None,
+        };
+
     for v in volumes {
         let parts: Vec<&str> = v.split(':').collect();
         if parts.len() < 2 {
@@ -227,7 +255,14 @@ pub async fn handle_run(run: RunArgs) -> Result<()> {
         let host_path = PathBuf::from(parts[0]);
         let tag = parts[1];
         let ro = parts.get(2).is_some_and(|&s| s == "ro");
-        builder = builder.virtiofs(tag, host_path, ro);
+        let mut mount = microvm_core::types::VirtioFsMount::new(tag, host_path, ro);
+        if let Some(cp) = parsed_cache {
+            mount = mount.with_cache_policy(cp);
+        }
+        if let Some(ps) = parsed_perms {
+            mount = mount.with_permission_semantics(ps);
+        }
+        builder = builder.virtiofs_mount(mount);
     }
 
     for a in artifacts {

@@ -184,6 +184,26 @@ pub struct RunArgs {
     #[arg(long = "disk")]
     pub disks: Vec<String>,
 
+    /// VirtioFS cache policy (never, auto, always; default: auto)
+    #[arg(long = "fs-cache")]
+    pub fs_cache: Option<String>,
+
+    /// VirtioFS permission semantics (complete, simplified; default: complete)
+    #[arg(long = "fs-permissions")]
+    pub fs_permissions: Option<String>,
+
+    /// Enable parallel reads on attached block disks
+    #[arg(long = "disk-parallel-reads")]
+    pub disk_parallel_reads: bool,
+
+    /// Worker thread pool size for block disk parallel reads (default: libkrun automatic pool)
+    #[arg(long = "disk-read-pool-size")]
+    pub disk_read_pool_size: Option<usize>,
+
+    /// Memory balloon free page reporting mode (default, replace; default: default)
+    #[arg(long = "balloon-reporting")]
+    pub balloon_reporting: Option<String>,
+
     /// Size of POSIX shared memory (/dev/shm) mounted inside the guest (e.g. 64m, 512m, 2g; default: 64m)
     #[arg(long = "shm-size")]
     pub shm_size: Option<String>,
