@@ -457,6 +457,22 @@ impl ArtifactMount {
     }
 }
 
+/// Specification for attaching a CNCF ModelPack AI model to a microVM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelAttachment {
+    pub reference: String,
+    pub mount_path: Option<String>,
+}
+
+impl ModelAttachment {
+    pub fn new(reference: impl Into<String>, mount_path: Option<String>) -> Self {
+        Self {
+            reference: reference.into(),
+            mount_path,
+        }
+    }
+}
+
 /// Specification for attaching an isolated Copy-on-Write workspace to a microVM.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CowWorkspace {

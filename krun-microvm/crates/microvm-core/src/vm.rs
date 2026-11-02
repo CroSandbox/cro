@@ -29,6 +29,7 @@ pub struct MicroVmBuilder {
     port_forwards: Vec<PortForward>,
     virtiofs_mounts: Vec<VirtioFsMount>,
     artifacts: Vec<ArtifactMount>,
+    models: Vec<crate::types::ModelAttachment>,
     cow_workspaces: Vec<CowWorkspace>,
     vsock_ports: Vec<VsockPort>,
     data_dir: Option<PathBuf>,
@@ -83,6 +84,7 @@ impl MicroVmBuilder {
             port_forwards: Vec::new(),
             virtiofs_mounts: Vec::new(),
             artifacts: Vec::new(),
+            models: Vec::new(),
             cow_workspaces: Vec::new(),
             vsock_ports: Vec::new(),
             data_dir: None,
@@ -301,6 +303,16 @@ impl MicroVmBuilder {
             tag: tag.into(),
             read_only,
         });
+        self
+    }
+
+    /// Attaches an AI/ML model conforming to the CNCF ModelPack Specification.
+    ///
+    /// Automatically mounts weights via VirtioFS, injects `MODEL_*` environment variables,
+    /// and provisions a VirtioFS DAX window for zero-copy shared memory access.
+    pub fn model(mut self, reference: impl Into<String>, mount_path: Option<String>) -> Self {
+        self.models
+            .push(crate::types::ModelAttachment::new(reference, mount_path));
         self
     }
 
@@ -920,7 +932,7 @@ impl MicroVmBuilder {
     }
 
     /// Sets up VirtioFS mounts including OCI artifacts, CoW workspaces, and Nydus chunk cache.
-    async fn prepare_virtiofs_mounts(
+    pub async fn prepare_virtiofs_mounts(
         &self,
         instance_dir: &Path,
         instance_rootfs: &Path,
@@ -943,6 +955,109 @@ impl MicroVmBuilder {
                     art_path,
                     art.read_only,
                 ));
+            }
+        }
+
+        // Attach requested CNCF ModelPack models
+        if !self.models.is_empty() {
+            let oci_client = OciClient::new();
+            for (idx, m) in self.models.iter().enumerate() {
+                let (host_model_dir, meta) = if Path::new(&m.reference).exists() {
+                    let path = PathBuf::from(&m.reference);
+                    let meta = crate::modelpack::ModelEngine::inspect_local_path(&path)?;
+                    (path, meta)
+                } else {
+                    let model_ref = ImageReference::parse(&m.reference)?;
+                    let model_path =
+                        match crate::modelpack::ModelEngine::find_cached(&m.reference, data_dir)? {
+                            Some(cached) => cached.path,
+                            None => {
+                                tracing::info!(
+                                    "ModelPack '{}' not found in cache; pulling from registry...",
+                                    model_ref.canonical_name()
+                                );
+                                oci_client.pull_model(&model_ref, data_dir).await?
+                            }
+                        };
+                    let meta = crate::modelpack::ModelEngine::inspect_local_path(&model_path)?;
+                    (model_path, meta)
+                };
+
+                let safe_name: String = meta
+                    .name
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
+                let tag = format!("model_{safe_name}_{idx}");
+                let guest_mount = m
+                    .mount_path
+                    .clone()
+                    .unwrap_or_else(|| format!("/models/{}", meta.name));
+
+                // Provision VirtioFS DAX window for weights
+                let dax_window = self.dax_window_size.unwrap_or_else(|| {
+                    if meta.format == crate::modelpack::ModelFormat::Gguf
+                        || meta.format == crate::modelpack::ModelFormat::Safetensors
+                    {
+                        let chunk = 256 * 1024 * 1024;
+                        if meta.total_size > 0 {
+                            (meta.total_size.div_ceil(chunk) * chunk).max(512 * 1024 * 1024)
+                        } else {
+                            2 * 1024 * 1024 * 1024
+                        }
+                    } else {
+                        0
+                    }
+                });
+
+                let mut virtio_mount = VirtioFsMount::new(tag.clone(), host_model_dir, true);
+                if dax_window > 0 {
+                    virtio_mount = virtio_mount.with_dax(dax_window);
+                }
+                final_virtiofs_mounts.push(virtio_mount);
+
+                // Prepare guest rootfs directory & symlinks
+                let tag_dir = instance_rootfs.join(&tag);
+                let _ = fs::create_dir_all(&tag_dir);
+
+                let clean_mount = guest_mount.trim_start_matches('/');
+                let target_link = instance_rootfs.join(clean_mount);
+                if let Some(parent) = target_link.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                #[cfg(unix)]
+                {
+                    if !target_link.exists() {
+                        let _ = std::os::unix::fs::symlink(format!("/{}", tag), &target_link);
+                    }
+                }
+
+                // Inject MODEL_* environment variables into .krun_config.json
+                let krun_cfg_path = instance_rootfs.join(crate::config::KrunConfig::FILE_NAME);
+                if krun_cfg_path.exists() {
+                    if let Ok(content) = fs::read(&krun_cfg_path) {
+                        if let Ok(mut krun_cfg) =
+                            serde_json::from_slice::<crate::config::KrunConfig>(&content)
+                        {
+                            krun_cfg.env.push(format!("MODEL_NAME={}", meta.name));
+                            krun_cfg.env.push(format!("MODEL_PATH={}", guest_mount));
+                            krun_cfg.env.push(format!("MODEL_FORMAT={}", meta.format));
+                            if let Some(ref arch) = meta.architecture {
+                                krun_cfg.env.push(format!("MODEL_ARCHITECTURE={}", arch));
+                            }
+                            if let Some(ref prec) = meta.precision {
+                                krun_cfg.env.push(format!("MODEL_PRECISION={}", prec));
+                            }
+                            let _ = krun_cfg.write_to(instance_rootfs);
+                        }
+                    }
+                }
             }
         }
 
@@ -2232,5 +2347,54 @@ mod tests {
     fn test_builder_shm_size_config() {
         let builder = MicroVmBuilder::new("alpine:latest").shm_size("2g");
         assert_eq!(builder.shm_size.as_deref(), Some("2g"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_model_attachment_and_auto_dax() {
+        let temp = tempfile::tempdir().unwrap();
+        let model_dir = temp.path().join("llama-model");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(
+            model_dir.join("tiny.Q4_K_M.gguf"),
+            b"MOCK_GGUF_WEIGHTS_4096",
+        )
+        .unwrap();
+        std::fs::write(
+            model_dir.join("config.json"),
+            b"{\"architectures\":[\"LlamaForCausalLM\"]}",
+        )
+        .unwrap();
+
+        let builder = MicroVmBuilder::new("alpine:latest")
+            .model(model_dir.to_str().unwrap(), Some("/custom/llm".to_string()));
+
+        assert_eq!(builder.models.len(), 1);
+        assert_eq!(builder.models[0].mount_path.as_deref(), Some("/custom/llm"));
+
+        let instance_dir = temp.path().join("instance");
+        let instance_rootfs = temp.path().join("rootfs");
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&instance_dir).unwrap();
+        std::fs::create_dir_all(&instance_rootfs).unwrap();
+
+        // Write initial krun config
+        let initial_cfg = crate::config::KrunConfig::new(vec!["/bin/sh".to_string()], vec![], None);
+        initial_cfg.write_to(&instance_rootfs).unwrap();
+
+        let virtio_mounts = builder
+            .prepare_virtiofs_mounts(&instance_dir, &instance_rootfs, &data_dir)
+            .await
+            .unwrap();
+
+        assert_eq!(virtio_mounts.len(), 1);
+        // VirtioFS DAX window should be automatically configured for GGUF weights
+        assert!(virtio_mounts[0].dax_window_size_bytes.unwrap_or(0) >= 512 * 1024 * 1024);
+
+        // Environment variables should be injected into krun config
+        let krun_cfg_path = instance_rootfs.join(crate::config::KrunConfig::FILE_NAME);
+        let content = std::fs::read_to_string(&krun_cfg_path).unwrap();
+        assert!(content.contains("MODEL_NAME=llama-model"));
+        assert!(content.contains("MODEL_PATH=/custom/llm"));
+        assert!(content.contains("MODEL_FORMAT=gguf"));
     }
 }

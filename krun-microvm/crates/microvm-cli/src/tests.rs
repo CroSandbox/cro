@@ -31,6 +31,123 @@ fn test_cli_parse_run_artifact_and_cow() {
 }
 
 #[test]
+fn test_cli_parse_model_subcommands() {
+    // 1. Model Pull
+    let pull_args = vec!["cro", "model", "pull", "ghcr.io/org/llama-3.2-1b:latest"];
+    let cli = Cli::try_parse_from(pull_args).unwrap();
+    match cli.command {
+        Commands::Model {
+            command: ModelCommands::Pull { model, data_dir },
+        } => {
+            assert_eq!(model, "ghcr.io/org/llama-3.2-1b:latest");
+            assert!(data_dir.is_none());
+        }
+        _ => panic!("Expected Commands::Model::Pull"),
+    }
+
+    // 2. Model List
+    let list_args = vec!["cro", "model", "list", "--json"];
+    let cli = Cli::try_parse_from(list_args).unwrap();
+    match cli.command {
+        Commands::Model {
+            command: ModelCommands::List { json, .. },
+        } => {
+            assert!(json);
+        }
+        _ => panic!("Expected Commands::Model::List"),
+    }
+
+    // 3. Model Info
+    let info_args = vec!["cro", "model", "info", "llama-3.2-1b"];
+    let cli = Cli::try_parse_from(info_args).unwrap();
+    match cli.command {
+        Commands::Model {
+            command: ModelCommands::Info { model, json, .. },
+        } => {
+            assert_eq!(model, "llama-3.2-1b");
+            assert!(!json);
+        }
+        _ => panic!("Expected Commands::Model::Info"),
+    }
+
+    // 4. Model Pack
+    let pack_args = vec![
+        "cro",
+        "model",
+        "pack",
+        "-s",
+        "/path/to/weights",
+        "-o",
+        "/path/to/layout",
+        "-n",
+        "my-llama",
+        "-f",
+        "gguf",
+        "-a",
+        "llama",
+        "-p",
+        "q4_k_m",
+        "--context-length",
+        "8192",
+        "-t",
+        "v1.0",
+    ];
+    let cli = Cli::try_parse_from(pack_args).unwrap();
+    match cli.command {
+        Commands::Model {
+            command:
+                ModelCommands::Pack {
+                    source,
+                    output,
+                    name,
+                    format,
+                    architecture,
+                    precision,
+                    context_length,
+                    tag,
+                    ..
+                },
+        } => {
+            assert_eq!(source, PathBuf::from("/path/to/weights"));
+            assert_eq!(output, PathBuf::from("/path/to/layout"));
+            assert_eq!(name, "my-llama");
+            assert_eq!(format, "gguf");
+            assert_eq!(architecture.as_deref(), Some("llama"));
+            assert_eq!(precision.as_deref(), Some("q4_k_m"));
+            assert_eq!(context_length, Some(8192));
+            assert_eq!(tag.as_deref(), Some("v1.0"));
+        }
+        _ => panic!("Expected Commands::Model::Pack"),
+    }
+}
+
+#[test]
+fn test_cli_parse_run_with_model() {
+    let args = vec![
+        "cro",
+        "run",
+        "--model",
+        "ghcr.io/org/llama-3.2-1b:latest:/models/llama",
+        "--model",
+        "./local-model",
+        "alpine:latest",
+    ];
+    let cli = Cli::try_parse_from(args).unwrap();
+    match cli.command {
+        Commands::Run(run) => {
+            assert_eq!(run.models.len(), 2);
+            assert_eq!(
+                run.models[0],
+                "ghcr.io/org/llama-3.2-1b:latest:/models/llama"
+            );
+            assert_eq!(run.models[1], "./local-model");
+            assert_eq!(run.image, "alpine:latest");
+        }
+        _ => panic!("Expected Commands::Run"),
+    }
+}
+
+#[test]
 fn test_cli_parse_egress_and_secrets() {
     let args = vec![
         "microvm",

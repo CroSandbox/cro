@@ -7,6 +7,7 @@ pub mod config;
 pub mod error;
 pub mod exec;
 pub mod metrics;
+pub mod modelpack;
 pub mod net;
 pub mod oci;
 pub mod preflight;
@@ -34,6 +35,10 @@ pub use error::{ComposeError, MicroVmError, NetError, SecurityError, StateError,
 pub use config::{parse_size_to_bytes, KrunConfig, OciConfig};
 pub use exec::{exec_in_guest_rootfs, exec_in_microvm, ExecRequest, ExecResponse};
 pub use metrics::{collect_process_stats, export_prometheus_metrics, ProcessStats};
+pub use modelpack::{
+    CachedModelMetadata, ModelConfig, ModelEngine, ModelFileEntry, ModelFileRole, ModelFormat,
+    ModelManifest, ModelPackOptions, ModelPacker,
+};
 pub use net::{
     create_pingora_egress_service, create_pingora_gateway_service, run_pingora_egress_server,
     run_pingora_gateway_server, DnsConfig, EgressPolicy, EgressProxyServer, LlmTokenBudget,
@@ -49,6 +54,6 @@ pub use state::{SnapshotManifest, StateManager, VmState, VmStatus};
 pub use tty::RawModeGuard;
 pub use types::{
     ArtifactMount, BootPayload, CowWorkspace, DiskAttachment, FirmwarePayload, KernelPayload,
-    PortForward, RunnerConfig, VirtioFsMount, VsockPort,
+    ModelAttachment, PortForward, RunnerConfig, VirtioFsMount, VsockPort,
 };
 pub use vm::{detect_kernel_format, parse_kernel_format, MicroVm, MicroVmBuilder};

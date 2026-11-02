@@ -21,6 +21,7 @@ pub async fn handle_run(run: RunArgs) -> Result<()> {
         ports,
         volumes,
         artifacts,
+        models,
         workspace_cow,
         env,
         workdir,
@@ -287,6 +288,15 @@ pub async fn handle_run(run: RunArgs) -> Result<()> {
             ),
         };
         builder = builder.attach_artifact(reference, tag, ro);
+    }
+
+    for m in models {
+        let (reference, mount_path) = if let Some(idx) = m.find(":/") {
+            (&m[..idx], Some(m[idx + 1..].to_string()))
+        } else {
+            (m.as_str(), None)
+        };
+        builder = builder.model(reference, mount_path);
     }
 
     for w in workspace_cow {

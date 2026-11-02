@@ -52,6 +52,10 @@ pub struct RunArgs {
     #[arg(long = "artifact")]
     pub artifacts: Vec<String>,
 
+    /// Attach a CNCF ModelPack AI model via VirtioFS with auto-DAX memory mapping: <model_ref_or_dir>[:<mount_path>]
+    #[arg(long = "model")]
+    pub models: Vec<String>,
+
     /// Mount an isolated Copy-on-Write (CoW) sandbox of a host directory: <host_path>:<tag>
     #[arg(long = "workspace-cow")]
     pub workspace_cow: Vec<String>,
@@ -513,6 +517,12 @@ pub enum Commands {
     Artifact {
         #[command(subcommand)]
         command: ArtifactCommands,
+    },
+
+    /// Manage AI/ML models conforming to the CNCF ModelPack Specification (pull, list, info, pack)
+    Model {
+        #[command(subcommand)]
+        command: ModelCommands,
     },
 
     /// Capture an instant Copy-on-Write snapshot of a microVM
@@ -981,6 +991,83 @@ pub enum ArtifactCommands {
         /// Custom data cache directory
         #[arg(long)]
         data_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ModelCommands {
+    /// Pull and unpack a CNCF ModelPack artifact from an OCI registry
+    Pull {
+        /// Model reference (e.g. ghcr.io/org/llama-3.2-1b:latest)
+        model: String,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// List all locally cached ModelPack models
+    List {
+        /// Format output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Inspect metadata, format, architecture, and layers of a ModelPack model
+    Info {
+        /// Model reference or local directory
+        model: String,
+
+        /// Format output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Package a local directory of weights and configs into a CNCF ModelPack OCI layout
+    Pack {
+        /// Directory containing model weight files and configs
+        #[arg(short = 's', long)]
+        source: PathBuf,
+
+        /// Destination directory for the packaged OCI Image Layout
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+
+        /// Model name (e.g. llama-3.2-1b-instruct)
+        #[arg(short = 'n', long)]
+        name: String,
+
+        /// Model weight format (gguf, safetensors, onnx, pytorch, mlx)
+        #[arg(short = 'f', long)]
+        format: String,
+
+        /// Semantic version (e.g. 1.0.0)
+        #[arg(short = 'v', long)]
+        version: Option<String>,
+
+        /// Base neural network architecture (e.g. llama, mistral, qwen)
+        #[arg(short = 'a', long)]
+        architecture: Option<String>,
+
+        /// Quantization / precision level (e.g. q4_k_m, fp16, int8)
+        #[arg(short = 'p', long)]
+        precision: Option<String>,
+
+        /// Maximum context length in tokens
+        #[arg(long)]
+        context_length: Option<u64>,
+
+        /// Tag annotation for the OCI layout index (default: latest)
+        #[arg(short = 't', long)]
+        tag: Option<String>,
     },
 }
 

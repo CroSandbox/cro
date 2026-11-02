@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)%20%7C%20Linux%20(KVM)-black.svg?style=for-the-badge&logo=apple)](https://github.com/CroSandbox/cro)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-218%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
+[![Tests](https://img.shields.io/badge/tests-230%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
 [![Cold Boot](https://img.shields.io/badge/boot_time-%3C100ms-success.svg?style=for-the-badge&logo=lightning)](https://github.com/CroSandbox/cro)
 [![Compose](https://img.shields.io/badge/orchestration-Docker%20Compose%20%7C%20K8s%20CRD-purple.svg?style=for-the-badge&logo=docker)](examples/krun-compose.yaml)
 
@@ -108,6 +108,21 @@ cd krun-microvm/sdks/elixir && PORT=4005 mix run --no-halt
 
 # Open the Web UI:
 open http://localhost:4005/unstructured
+```
+
+### 8. Package & Run AI Models via CNCF ModelPack (`cro model` & `cro run --model`)
+```bash
+# Package local model weights (GGUF, Safetensors, ONNX) into a CNCF ModelPack OCI layout:
+cro model pack -s ./models/llama3 -o ./llama3-modelpack -n llama-3.2-1b -f gguf -a llama -p q4_k_m
+
+# Inspect model architecture, layers, precision, and context length:
+cro model info ./llama3-modelpack
+
+# Pull and cache an AI ModelPack artifact from any standard OCI container registry:
+cro model pull ghcr.io/org/llama-3.2-1b:latest
+
+# Run an inference container with zero-copy VirtioFS DAX shared memory mapping:
+cro run --model ghcr.io/org/llama-3.2-1b:latest:/models/llm alpine:latest -- ls -lh /models/llm
 ```
 
 ---
@@ -529,6 +544,63 @@ cro run \
 - **Orderly ACPI/GPIO EventFd Shutdown**: Clean eventfd-based poweroff interrupts allow guest kernels to gracefully sync file systems and unmount before hypervisor termination.
 - **VirtioFS DAX Zero-Copy Window**: Direct access memory mapping (`--dax <size>`) maps LLM weights (GGUF, Safetensors) directly into the guest address space with zero memory duplication.
 - **In-Memory File Overlays**: Seamless zero-disk injection of system configuration files (`/etc/hosts`, `/etc/resolv.conf`, network credentials) via `one_shot` virtual entries.
+
+---
+
+## 📦 CNCF ModelPack Specification (`cro model`)
+
+`cro` natively adopts the **[CNCF ModelPack Specification](https://github.com/modelpack/model-spec)** (`modelpack/model-spec`), establishing vendor-neutral packaging, distribution, and zero-copy hypervisor execution for AI/ML models.
+
+### Key Capabilities
+
+1. **Vendor-Neutral OCI Distribution**:
+   AI models (weights, tokenizers, architecture descriptors, model cards) are packaged into standard OCI artifacts and stored directly in your container registry (GHCR, Docker Hub, Quay, Harbor) with dedicated media types:
+   - **Manifest**: `application/vnd.cncf.model.manifest.v1+json`
+   - **Config**: `application/vnd.cncf.model.config.v1+json`
+   - **Weight Layer**: `application/vnd.cncf.model.weight.v1.tar`
+   - **Config Layer**: `application/vnd.cncf.model.weight.config.v1.tar`
+   - **Tokenizer Layer**: `application/vnd.cncf.model.tokenizer.v1.tar`
+   - **Documentation**: `application/vnd.cncf.model.doc.v1.tar`
+
+2. **Zero-Copy VirtioFS DAX Execution**:
+   When launching a microVM with `--model <ref>[:<mount_path>]`, `cro` automatically inspects the model format (GGUF, Safetensors, ONNX) and provisions an appropriately sized **VirtioFS DAX (Direct Access) shared memory window**. Weights are directly `mmap`'d into the guest virtual address space without double-buffering or memory duplication.
+
+3. **Automatic Guest Environment Injection**:
+   Every attached ModelPack automatically injects guest runtime environment variables into `/.krun_config.json`:
+   - `MODEL_NAME`: Identifier of the model (e.g. `llama-3.2-1b-instruct`)
+   - `MODEL_PATH`: Guest mount point (default: `/models/<name>` or custom)
+   - `MODEL_FORMAT`: Weight serialization format (`gguf`, `safetensors`, `onnx`, `pytorch`)
+   - `MODEL_ARCHITECTURE`: Base neural network architecture (e.g. `llama`, `mistral`)
+   - `MODEL_PRECISION`: Quantization or precision level (e.g. `q4_k_m`, `fp16`)
+
+### Commands & Workflows
+
+```bash
+# Package local GGUF weights into a ModelPack OCI layout:
+cro model pack \
+    --source ./models/llama3 \
+    --output ./llama3-oci \
+    --name llama-3.2-1b-instruct \
+    --format gguf \
+    --architecture llama \
+    --precision q4_k_m \
+    --context-length 131072
+
+# Inspect ModelPack metadata and layers:
+cro model info ./llama3-oci
+
+# Pull and cache an AI ModelPack artifact from an OCI registry:
+cro model pull ghcr.io/meta-llama/llama-3.2-1b-instruct:latest
+
+# List all locally cached ModelPack models:
+cro model list
+
+# Run inference inside an isolated microVM with auto-DAX memory mapping:
+cro run --model ghcr.io/meta-llama/llama-3.2-1b-instruct:latest:/models/llm \
+    --gpu \
+    ghcr.io/ggerganov/llama.cpp:server \
+    -- -m /models/llm/llama-3.2-1b.Q4_K_M.gguf --port 8080
+```
 
 ---
 
@@ -1215,6 +1287,7 @@ EOF
 | **`network pingora`**| `cro network pingora --listen <addr>` | Start a Cloudflare Pingora L7 gateway or zero-trust egress proxy |
 | **`metrics`** | `cro metrics [--listen <addr>]` | Export Prometheus metrics or serve live Prometheus scrape endpoint |
 | **`artifact`** | `cro artifact pull / list` | Manage detached OCI artifacts (LLM weights, datasets, toolchains) |
+| **`model`** | `cro model pull / list / info / pack` | Manage AI/ML models conforming to CNCF ModelPack Spec with zero-copy DAX |
 | **`containerd`**| `cro containerd install / status` | Manage containerd v2 runtime shim (`containerd-shim-krun-v2`) |
 | **`preflight`** | `cro preflight` | Run hypervisor preflight checks (macOS Hypervisor.framework / Linux KVM) |
 | **`info`** | `cro info` | Display host hypervisor capabilities, cache size, and system state |

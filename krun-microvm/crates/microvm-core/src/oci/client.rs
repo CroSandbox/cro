@@ -37,7 +37,10 @@ struct Platform {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub(crate) struct SingleManifest {
+    #[serde(rename = "artifactType")]
+    pub(crate) artifact_type: Option<String>,
     pub(crate) config: BlobDescriptor,
     pub(crate) layers: Vec<BlobDescriptor>,
 }
@@ -115,6 +118,15 @@ impl OciClient {
         cache_base: &Path,
     ) -> Result<PathBuf> {
         super::artifact::pull_artifact_impl(self, reference, cache_base).await
+    }
+
+    /// Pulls a CNCF ModelPack artifact into cache_base/models/<digest>.
+    pub async fn pull_model(
+        &self,
+        reference: &ImageReference,
+        cache_base: &Path,
+    ) -> Result<PathBuf> {
+        crate::modelpack::ModelEngine::pull_model(self, reference, cache_base).await
     }
 
     /// Obtains an anonymous bearer token for pulling from any OCI compliant registry.

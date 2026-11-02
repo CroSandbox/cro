@@ -13,6 +13,7 @@ pub mod containerd;
 pub mod kube;
 pub mod lifecycle;
 pub mod metrics;
+pub mod model;
 pub mod network;
 pub mod run;
 pub mod sandbox;
@@ -146,6 +147,8 @@ pub async fn dispatch(command: Commands) -> Result<()> {
         Commands::Info => system::handle_info()?,
 
         Commands::Artifact { command } => artifact::handle_artifact_command(command).await?,
+
+        Commands::Model { command } => model::handle_model_command(command).await?,
 
         Commands::Snapshot {
             id,
