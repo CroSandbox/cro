@@ -1153,6 +1153,34 @@ pub struct ServeArgs {
     #[arg(long)]
     pub api_key: Option<String>,
 
+    /// Public model alias or served model name exposed in the OpenAI-compatible API
+    #[arg(long = "served-model-name", visible_alias = "alias")]
+    pub served_model_name: Option<String>,
+
+    /// Host plugin directory or file to mount into guest and add to PYTHONPATH (can be repeated)
+    #[arg(long = "plugin", action = clap::ArgAction::Append)]
+    pub plugins: Vec<PathBuf>,
+
+    /// vLLM plugin module name to register with VLLM_PLUGINS environment variable (can be repeated)
+    #[arg(long = "vllm-plugin", action = clap::ArgAction::Append)]
+    pub vllm_plugins: Vec<String>,
+
+    /// Allow custom model code execution in vLLM (--trust-remote-code)
+    #[arg(long)]
+    pub trust_remote_code: bool,
+
+    /// Quantization method override for vLLM (e.g. awq, gptq, fp8, marlin, bitsandbytes)
+    #[arg(long)]
+    pub quantization: Option<String>,
+
+    /// Path to a custom Jinja chat template file
+    #[arg(long)]
+    pub chat_template: Option<PathBuf>,
+
+    /// Set custom environment variable inside the microVM (format: KEY=VALUE, can be repeated)
+    #[arg(short = 'e', long = "env", action = clap::ArgAction::Append)]
+    pub env: Vec<String>,
+
     /// Run the inference server in the background (detached mode)
     #[arg(short = 'd', long)]
     pub detach: bool,

@@ -25,14 +25,27 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     config.tensor_parallel_size = args.tensor_parallel_size;
     config.enforce_eager = args.enforce_eager;
     config.api_key = args.api_key;
+    config.served_model_name = args.served_model_name;
+    config.plugins = args.plugins;
+    config.vllm_plugins = args.vllm_plugins;
+    config.trust_remote_code = args.trust_remote_code;
+    config.quantization = args.quantization;
+    config.chat_template = args.chat_template;
+    for env_str in args.env {
+        if let Some((k, v)) = env_str.split_once('=') {
+            config.env_vars.push((k.to_string(), v.to_string()));
+        } else {
+            config.env_vars.push((env_str, String::new()));
+        }
+    }
     config.data_dir = args.data_dir;
     config.extra_args = args.extra_args;
 
     let wait = !args.no_wait && args.wait;
-    let handle = ServeManager::start(&config, args.detach, wait).await?;
+    let mut handle = ServeManager::start(&config, args.detach, wait).await?;
 
     if !args.detach {
-        handle.wait().await?;
+        handle.wait_with_sigint().await?;
     }
 
     Ok(())

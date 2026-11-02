@@ -680,10 +680,15 @@ graph TD
 2. **VirtioFS DAX Zero-Copy Weight Injection**:
    Model weights are never copied or double-buffered. A dedicated DAX window is automatically calculated and provisioned into the guest's physical address space, allowing instant model loading without guest memory pressure.
 
-3. **Production Lifecycles & Live Health Probing**:
-   `cro serve` actively polls `/health` and `/v1/models` using exponential backoff up to 120s before returning. When ready, it renders a terminal summary card with active endpoints and ready-to-run `curl` commands.
+3. **Production Lifecycles & Fast-Fail Health Probing**:
+   `cro serve` actively polls `/health` and `/v1/models` using exponential backoff up to 120s before returning. The prober continuously monitors microVM process liveness: if the engine exits prematurely (e.g. invalid flags or bad weights), `cro` fails fast in `<1s` and extracts the console log trace rather than hanging. In interactive foreground mode, `Ctrl+C` is trapped for graceful zero-leak hypervisor shutdown.
 
-4. **Multi-Service Declarative Compose & Token Governance**:
+4. **vLLM Plugin Extensions & Model Aliasing**:
+   - **Custom Plugins**: Mount host Python plugins/packages directly into the guest via zero-copy VirtioFS mounts (`--plugin <path>`), automatically updating `PYTHONPATH` and configuring `VLLM_PLUGINS` (`--vllm-plugin <name>`).
+   - **Model Aliasing**: Customize the public model name exposed in `/v1/models` and `/v1/chat/completions` using `--alias <name>` or `--served-model-name <name>`.
+   - **Quantization & Chat Templates**: Override quantization methods with `--quantization <method>` (e.g., `awq`, `gptq`, `fp8`, `marlin`), enable `--trust-remote-code`, or mount custom Jinja chat templates via `--chat-template <path>`.
+
+5. **Multi-Service Declarative Compose & Token Governance**:
    Deploy full-stack inference pipelines pairing `vLLM` backends with a Cloudflare Pingora reverse proxy enforcing zero-trust egress and strict token ceilings (`examples/vllm-compose.yaml`).
 
 ### Usage Examples
@@ -692,10 +697,21 @@ graph TD
 # 1. Zero-config serve (auto-detects format, auto-provisions DAX & GPU):
 cro serve llama-3.2-1b
 
-# 2. Run in background (detached) and wait for readiness probe:
-cro serve llama-3.2-1b -d --wait
+# 2. Serve with clean model alias and run in background (detached):
+cro serve /path/to/weights --alias llama-3.2-1b -d
 
-# 3. Query the endpoint using standard OpenAI schema:
+# 3. Serve with custom vLLM plugins, quantization, and chat template:
+cro serve meta-llama/Llama-3.1-8B-Instruct \
+  --engine vllm \
+  --alias llama-3.1 \
+  --plugin ./custom_vllm_plugins \
+  --vllm-plugin custom_vllm_plugins \
+  --quantization fp8 \
+  --chat-template ./templates/custom.jinja \
+  --trust-remote-code \
+  -d
+
+# 4. Query the endpoint using standard OpenAI schema:
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
@@ -703,14 +719,14 @@ curl http://127.0.0.1:8000/v1/chat/completions \
     "messages": [{"role": "user", "content": "What are the advantages of microVM isolation?"}]
   }'
 
-# 4. First-class alias `cro vllm` with custom context length and tensor parallelism:
+# 5. First-class alias `cro vllm` with custom context length and tensor parallelism:
 cro vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --max-model-len 8192 \
   --memory 16384 \
   --cpus 8 \
   --port 8000
 
-# 5. Declarative multi-service deployment with Compose & Pingora token gateway:
+# 6. Declarative multi-service deployment with Compose & Pingora token gateway:
 cro compose up -f examples/vllm-compose.yaml -d
 ```
 

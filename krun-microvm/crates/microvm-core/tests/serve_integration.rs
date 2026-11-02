@@ -228,3 +228,51 @@ async fn test_serve_explicit_engine_and_overrides() {
         .iter()
         .any(|pf| pf.host == 9000 && pf.guest == 8000));
 }
+
+#[tokio::test]
+async fn test_serve_vllm_plugins_and_alias_pipeline() {
+    let temp = tempfile::tempdir().unwrap();
+    let model_dir = temp.path().join("mock_hf_model");
+    let plugin_dir = temp.path().join("my_vllm_plugin_pkg");
+    let chat_tpl = temp.path().join("template.jinja");
+
+    fs::create_dir_all(&model_dir).unwrap();
+    fs::create_dir_all(&plugin_dir).unwrap();
+    fs::write(model_dir.join("model.safetensors"), vec![0x11u8; 1024]).unwrap();
+    fs::write(
+        model_dir.join("config.json"),
+        b"{\"architectures\":[\"Qwen2ForCausalLM\"],\"model_type\":\"qwen2\"}",
+    )
+    .unwrap();
+    fs::write(plugin_dir.join("__init__.py"), b"# plugin init").unwrap();
+    fs::write(&chat_tpl, b"{{ messages }}").unwrap();
+
+    let meta = ModelEngine::inspect_local_path(&model_dir).unwrap();
+
+    let serve_cfg = ServeConfig::new(model_dir.to_str().unwrap())
+        .alias("qwen-2.5-7b-instruct")
+        .plugin(&plugin_dir)
+        .vllm_plugin("my_vllm_plugin_pkg")
+        .trust_remote_code(true)
+        .quantization("awq")
+        .chat_template(&chat_tpl)
+        .env("CUSTOM_INFERENCE_FLAG", "1");
+
+    let cmd = serve_cfg.build_container_cmd(ServeEngine::Vllm, &meta);
+    assert!(cmd.contains(&"--served-model-name".to_string()));
+    assert!(cmd.contains(&"qwen-2.5-7b-instruct".to_string()));
+    assert!(cmd.contains(&"--trust-remote-code".to_string()));
+    assert!(cmd.contains(&"--quantization".to_string()));
+    assert!(cmd.contains(&"awq".to_string()));
+    assert!(cmd.contains(&"--chat-template".to_string()));
+    assert!(cmd.contains(&"/etc/chat_template.jinja".to_string()));
+
+    let builder = serve_cfg
+        .to_microvm_builder(ServeEngine::Vllm, &meta, &model_dir)
+        .unwrap();
+
+    // Verify chat template was mounted into guest
+    assert!(builder.get_file_mounts().iter().any(
+        |(src, dest)| src == &chat_tpl && dest.to_str().unwrap() == "/etc/chat_template.jinja"
+    ));
+}

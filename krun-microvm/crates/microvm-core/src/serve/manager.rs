@@ -30,6 +30,28 @@ impl ServeHandle {
             bail!("MicroVM was launched in detached mode; no active process handle to await");
         }
     }
+
+    /// Awaits the microVM process while gracefully capturing SIGINT / Ctrl+C.
+    pub async fn wait_with_sigint(&mut self) -> Result<()> {
+        if let Some(ref mut vm) = self.vm {
+            tokio::select! {
+                res = vm.wait() => {
+                    let status = res?;
+                    if !status.success() {
+                        bail!("MicroVM exited with error status: {}", status);
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    println!("\n🛑 Interrupted. Gracefully stopping microVM inference server (VM ID: {})...", self.vm_id);
+                    let _ = vm.stop().await;
+                    println!("✅ MicroVM stopped cleanly.");
+                }
+            }
+            Ok(())
+        } else {
+            bail!("MicroVM was launched in detached mode; no active process handle to await");
+        }
+    }
 }
 
 pub struct ServeManager;
@@ -73,7 +95,7 @@ impl ServeManager {
         }
 
         // 4. Spawn microVM
-        let vm = builder
+        let mut vm = builder
             .run()
             .await
             .context("Failed to spawn serving microVM")?;
@@ -82,6 +104,7 @@ impl ServeManager {
         let base_url = format!("http://{}:{}/v1", config.host, config.host_port);
         let chat_url = format!("{}/chat/completions", base_url);
         let models_url = format!("{}/models", base_url);
+        let model_alias = config.effective_model_name(&meta);
 
         // 5. Health check probing
         if !detach || wait {
@@ -89,10 +112,16 @@ impl ServeManager {
                 "⏳ Probing inference server readiness on port {}...",
                 config.host_port
             );
-            Self::poll_readiness(&config.host, config.host_port, Duration::from_secs(120)).await?;
+            Self::poll_readiness_with_vm(
+                &config.host,
+                config.host_port,
+                Duration::from_secs(120),
+                Some(&mut vm),
+            )
+            .await?;
 
             Self::print_summary_card(
-                &meta.name,
+                model_alias,
                 active_engine,
                 &base_url,
                 &chat_url,
@@ -107,7 +136,7 @@ impl ServeManager {
         Ok(ServeHandle {
             vm_id,
             engine: active_engine,
-            model_name: meta.name,
+            model_name: model_alias.to_string(),
             base_url,
             chat_url,
             models_url,
@@ -117,6 +146,16 @@ impl ServeManager {
 
     /// Polls the inference server readiness endpoint until it responds with HTTP 200 OK.
     pub async fn poll_readiness(host: &str, port: u16, timeout: Duration) -> Result<()> {
+        Self::poll_readiness_with_vm(host, port, timeout, None).await
+    }
+
+    /// Polls the inference server readiness endpoint with microVM health monitoring.
+    pub async fn poll_readiness_with_vm(
+        host: &str,
+        port: u16,
+        timeout: Duration,
+        mut vm: Option<&mut MicroVm>,
+    ) -> Result<()> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(3))
             .build()?;
@@ -130,6 +169,17 @@ impl ServeManager {
         let mut interval = Duration::from_millis(500);
 
         while start.elapsed() < timeout {
+            // Check if microVM process is still alive
+            if let Some(ref mut v) = vm {
+                if !v.is_alive() {
+                    let log_snippet = Self::read_console_log_tail(&v.console_log_path(), 30);
+                    bail!(
+                        "Inference microVM exited prematurely during startup.\n{}",
+                        log_snippet
+                    );
+                }
+            }
+
             for url in &health_urls {
                 if let Ok(resp) = client.get(url).send().await {
                     if resp.status().is_success() {
@@ -150,6 +200,23 @@ impl ServeManager {
             host,
             port
         );
+    }
+
+    /// Helper to read the last `tail_lines` from the console log file for error reporting.
+    fn read_console_log_tail(log_path: &std::path::Path, tail_lines: usize) -> String {
+        if !log_path.exists() {
+            return "(MicroVM was running in interactive mode; check terminal output above for error details)".to_string();
+        }
+        match std::fs::read_to_string(log_path) {
+            Ok(content) if !content.trim().is_empty() => {
+                let lines: Vec<&str> = content.lines().collect();
+                let start_idx = lines.len().saturating_sub(tail_lines);
+                let tail = lines[start_idx..].join("\n");
+                format!("Recent console log:\n---\n{}\n---", tail)
+            }
+            Ok(_) => "(Console log is empty)".to_string(),
+            Err(e) => format!("(Failed to read console log: {})", e),
+        }
     }
 
     /// Displays the formatted endpoint summary card.

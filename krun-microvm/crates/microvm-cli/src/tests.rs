@@ -185,6 +185,19 @@ fn test_cli_parse_serve_and_vllm() {
         "--tensor-parallel-size",
         "2",
         "--enforce-eager",
+        "--alias",
+        "mistral-custom",
+        "--plugin",
+        "/tmp/custom_plugins",
+        "--vllm-plugin",
+        "plugin_module_x",
+        "--trust-remote-code",
+        "--quantization",
+        "fp8",
+        "--chat-template",
+        "/tmp/chat.jinja",
+        "-e",
+        "HF_TOKEN=hf_mock",
         "-d",
     ];
     let cli2 = Cli::try_parse_from(custom_serve).unwrap();
@@ -199,6 +212,13 @@ fn test_cli_parse_serve_and_vllm() {
             assert_eq!(args.max_model_len, Some(8192));
             assert_eq!(args.tensor_parallel_size, 2);
             assert!(args.enforce_eager);
+            assert_eq!(args.served_model_name.as_deref(), Some("mistral-custom"));
+            assert_eq!(args.plugins, vec![PathBuf::from("/tmp/custom_plugins")]);
+            assert_eq!(args.vllm_plugins, vec!["plugin_module_x".to_string()]);
+            assert!(args.trust_remote_code);
+            assert_eq!(args.quantization.as_deref(), Some("fp8"));
+            assert_eq!(args.chat_template, Some(PathBuf::from("/tmp/chat.jinja")));
+            assert_eq!(args.env, vec!["HF_TOKEN=hf_mock".to_string()]);
             assert!(args.detach);
         }
         _ => panic!("Expected Commands::Serve"),
