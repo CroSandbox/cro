@@ -4,11 +4,13 @@
 //! CNCF ModelPack CLI commands (pull, list, info, pack).
 
 use crate::args::ModelCommands;
-use crate::utils::default_data_dir;
+use crate::utils::{default_data_dir, truncate_str};
 use anyhow::{Context, Result};
 use microvm_core::{
+    modelpack::{HardwareFit, ModelDiscovery},
     ImageReference, ModelEngine, ModelFormat, ModelPackOptions, ModelPacker, OciClient,
 };
+use std::path::PathBuf;
 
 pub async fn handle_model_command(command: ModelCommands) -> Result<()> {
     match command {
@@ -152,6 +154,96 @@ pub async fn handle_model_command(command: ModelCommands) -> Result<()> {
             println!("   Config digest:   {}", manifest.config.digest);
             println!("   Total layers:    {}", manifest.layers.len());
             println!("   OCI layout at:   {}", output.display());
+        }
+
+        ModelCommands::Discover {
+            custom_paths,
+            json,
+            data_dir,
+        } => {
+            let cache_base = data_dir.unwrap_or_else(default_data_dir);
+            let models = ModelDiscovery::discover(&cache_base, &custom_paths);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&models)?);
+                return Ok(());
+            }
+
+            if models.is_empty() {
+                println!("🔍 No local models found across standard directories.");
+                println!("Scanned locations: Hugging Face hub, LM Studio, Ollama, ~/models, and cro cache.");
+                println!("Pass custom search paths with: cro model discover --path <dir>");
+                return Ok(());
+            }
+
+            println!(
+                "{:<32} {:<14} {:<12} {:<18} LOCATION",
+                "NAME", "FORMAT", "SIZE", "ECOSYSTEM"
+            );
+            println!("{:-<110}", "");
+            for m in models {
+                println!(
+                    "{:<32} {:<14} {:<12} {:<18} {}",
+                    truncate_str(&m.name, 30),
+                    m.format,
+                    format_bytes(m.size_bytes),
+                    m.source,
+                    m.path.display()
+                );
+            }
+        }
+
+        ModelCommands::Fit {
+            model,
+            context_length,
+            json,
+        } => {
+            let path = PathBuf::from(&model);
+            let fit = HardwareFit::profile(&path, Some(context_length))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&fit)?);
+                return Ok(());
+            }
+
+            println!("Hardware Memory Profiling & Fit Analysis");
+            println!("{:-<60}", "");
+            println!("Model:                  {}", model);
+            println!(
+                "Model Weights Size:     {}",
+                format_bytes(fit.model_size_bytes)
+            );
+            println!("Target Context:         {} tokens", fit.context_length);
+            println!(
+                "Estimated KV Cache:     {}",
+                format_bytes(fit.estimated_kv_cache_bytes)
+            );
+            println!(
+                "Runtime Overhead:       {}",
+                format_bytes(fit.runtime_overhead_bytes)
+            );
+            println!(
+                "Total Memory Needed:    {}",
+                format_bytes(fit.total_required_bytes)
+            );
+            println!("{:-<60}", "");
+            println!(
+                "Host Total Memory:      {}",
+                format_bytes(fit.host_total_bytes)
+            );
+            println!(
+                "Host Available RAM:     {}",
+                format_bytes(fit.host_available_bytes)
+            );
+            println!("{:-<60}", "");
+            println!(
+                "Recommended Guest RAM:  {} MiB",
+                fit.recommended_guest_ram_mib
+            );
+            println!(
+                "Recommended GPU vRAM:   {} GiB (--gpu-shm-size)",
+                fit.recommended_gpu_shm_gib
+            );
+            println!("{:-<60}", "");
+            println!("Suitability Verdict:    {}", fit.verdict);
         }
     }
 

@@ -1,7 +1,8 @@
 // Copyright 2026, libkrun-sdk authors.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ui::app::{App, Tab};
+use crate::ui::app::{App, ServeFocus, Tab};
+use microvm_core::modelpack::{DiscoveredModel, ModelFormat, ModelSource};
 use std::path::PathBuf;
 
 #[test]
@@ -78,4 +79,56 @@ fn test_app_item_navigation_empty() {
 
     app.prev_item();
     assert_eq!(app.selected_instance, 0);
+}
+
+#[test]
+fn test_app_discovered_models_navigation() {
+    let mut app = App::new(PathBuf::from("/tmp"));
+    app.select_tab(Tab::Serve);
+    assert_eq!(app.serve_focus, ServeFocus::Discovered);
+
+    app.discovered_models = vec![
+        DiscoveredModel {
+            name: "model-1.gguf".to_string(),
+            path: PathBuf::from("/models/m1.gguf"),
+            format: ModelFormat::Gguf,
+            size_bytes: 1024 * 1024 * 100,
+            source: ModelSource::LocalDir,
+        },
+        DiscoveredModel {
+            name: "model-2.safetensors".to_string(),
+            path: PathBuf::from("/models/m2.safetensors"),
+            format: ModelFormat::Safetensors,
+            size_bytes: 1024 * 1024 * 500,
+            source: ModelSource::HuggingFace,
+        },
+    ];
+
+    assert_eq!(app.selected_discovered, 0);
+    assert_eq!(
+        app.selected_discovered_model().unwrap().name,
+        "model-1.gguf"
+    );
+
+    // Navigate next
+    app.next_item();
+    assert_eq!(app.selected_discovered, 1);
+    assert_eq!(
+        app.selected_discovered_model().unwrap().name,
+        "model-2.safetensors"
+    );
+
+    // Wrap around
+    app.next_item();
+    assert_eq!(app.selected_discovered, 0);
+
+    // Prev item
+    app.prev_item();
+    assert_eq!(app.selected_discovered, 1);
+
+    // Toggle focus
+    app.toggle_serve_focus();
+    assert_eq!(app.serve_focus, ServeFocus::Active);
+    app.toggle_serve_focus();
+    assert_eq!(app.serve_focus, ServeFocus::Discovered);
 }

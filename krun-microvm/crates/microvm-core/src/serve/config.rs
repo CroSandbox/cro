@@ -4,7 +4,7 @@
 //! Serving configuration and inference engine auto-dispatch for `cro serve` and `cro vllm`.
 
 use crate::config::parse_size_to_bytes;
-use crate::modelpack::{CachedModelMetadata, ModelFormat};
+use crate::modelpack::{CachedModelMetadata, HardwareFit, ModelFormat};
 use crate::vm::MicroVmBuilder;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -467,9 +467,30 @@ impl ServeConfig {
         let image = self.resolve_image(active_engine);
         let cmd = self.build_container_cmd(active_engine, meta);
 
+        let effective_memory_mb = if self.memory_mb == 8192 && meta.total_size > 0 {
+            let ctx = self.max_model_len.or(meta.context_length).unwrap_or(4096);
+            if let Ok(fit) = HardwareFit::profile(model_path, Some(ctx)) {
+                if fit.recommended_guest_ram_mib > self.memory_mb {
+                    tracing::info!(
+                        "Auto-sizing guest RAM to {} MiB based on hardware fit profile (weights: {} MB, KV: {} MB)",
+                        fit.recommended_guest_ram_mib,
+                        fit.model_size_bytes / (1024 * 1024),
+                        fit.estimated_kv_cache_bytes / (1024 * 1024)
+                    );
+                    fit.recommended_guest_ram_mib
+                } else {
+                    self.memory_mb
+                }
+            } else {
+                self.memory_mb
+            }
+        } else {
+            self.memory_mb
+        };
+
         let mut builder = MicroVmBuilder::new(image)
             .cpus(self.cpus)
-            .memory_mb(self.memory_mb)
+            .memory_mb(effective_memory_mb)
             .cmd(cmd)
             .port_forward(self.host_port, 8000)
             .model(
@@ -479,8 +500,17 @@ impl ServeConfig {
 
         if self.gpu {
             builder = builder.gpu(true);
-            let shm_bytes = parse_size_to_bytes(&self.gpu_shm_size)
+            let mut shm_bytes = parse_size_to_bytes(&self.gpu_shm_size)
                 .map_err(|e| anyhow::anyhow!("Invalid --gpu-shm-size: {}", e))?;
+            if self.gpu_shm_size == "4G" {
+                let ctx = self.max_model_len.or(meta.context_length).unwrap_or(4096);
+                if let Ok(fit) = HardwareFit::profile(model_path, Some(ctx)) {
+                    let rec_shm_bytes = (fit.recommended_gpu_shm_gib as u64) * 1024 * 1024 * 1024;
+                    if rec_shm_bytes > shm_bytes {
+                        shm_bytes = rec_shm_bytes;
+                    }
+                }
+            }
             builder = builder.gpu_shm_size(shm_bytes);
         }
 
@@ -718,5 +748,34 @@ mod tests {
         assert_eq!(cmd[0], "/app/llama-server");
         assert!(cmd.contains(&"--alias".to_string()));
         assert!(cmd.contains(&"deepseek-r1-distill".to_string()));
+    }
+
+    #[test]
+    fn test_to_microvm_builder_auto_memory_fit() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let model_file = temp_dir.path().join("model.safetensors");
+        // Write 10 MB dummy file
+        std::fs::write(&model_file, vec![0u8; 10 * 1024 * 1024]).unwrap();
+
+        let config = ServeConfig::new("test-model");
+        let meta = CachedModelMetadata {
+            reference: "local://test-model".to_string(),
+            digest: "sha256:test".to_string(),
+            name: "test-model".to_string(),
+            format: ModelFormat::Safetensors,
+            architecture: Some("llama".to_string()),
+            precision: Some("fp16".to_string()),
+            context_length: Some(4096),
+            files: vec![],
+            total_size: 10 * 1024 * 1024,
+            created_at: 1000,
+            path: model_file.clone(),
+        };
+
+        let builder = config
+            .to_microvm_builder(ServeEngine::Vllm, &meta, &model_file)
+            .unwrap();
+        // Since default is 8192 MB and 10MB model fit doesn't exceed 8192 MB, memory remains 8192 MB
+        assert_eq!(builder.get_ram_mib(), 8192);
     }
 }

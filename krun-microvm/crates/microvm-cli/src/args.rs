@@ -1110,6 +1110,35 @@ pub enum ModelCommands {
         #[arg(short = 't', long)]
         tag: Option<String>,
     },
+
+    /// Discover locally available models across Hugging Face, LM Studio, Ollama, and local directories
+    Discover {
+        /// Optional custom search directories
+        #[arg(long = "path")]
+        custom_paths: Vec<PathBuf>,
+
+        /// Format output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Pre-flight hardware memory profiling and suitability estimate for a model
+    Fit {
+        /// Path to model file, directory, or model name
+        model: String,
+
+        /// Target context length in tokens (default: 4096)
+        #[arg(long, default_value_t = 4096)]
+        context_length: u64,
+
+        /// Format output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

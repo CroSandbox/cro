@@ -279,6 +279,55 @@ fn test_cli_parse_model_subcommands() {
         }
         _ => panic!("Expected Commands::Model::Pack"),
     }
+
+    // 5. Model Discover
+    let discover_args = vec![
+        "cro",
+        "model",
+        "discover",
+        "--path",
+        "/custom/models",
+        "--json",
+    ];
+    let cli = Cli::try_parse_from(discover_args).unwrap();
+    match cli.command {
+        Commands::Model {
+            command: ModelCommands::Discover {
+                custom_paths, json, ..
+            },
+        } => {
+            assert_eq!(custom_paths, vec![PathBuf::from("/custom/models")]);
+            assert!(json);
+        }
+        _ => panic!("Expected Commands::Model::Discover"),
+    }
+
+    // 6. Model Fit
+    let fit_args = vec![
+        "cro",
+        "model",
+        "fit",
+        "/path/to/model.gguf",
+        "--context-length",
+        "8192",
+        "--json",
+    ];
+    let cli = Cli::try_parse_from(fit_args).unwrap();
+    match cli.command {
+        Commands::Model {
+            command:
+                ModelCommands::Fit {
+                    model,
+                    context_length,
+                    json,
+                },
+        } => {
+            assert_eq!(model, "/path/to/model.gguf");
+            assert_eq!(context_length, 8192);
+            assert!(json);
+        }
+        _ => panic!("Expected Commands::Model::Fit"),
+    }
 }
 
 #[test]

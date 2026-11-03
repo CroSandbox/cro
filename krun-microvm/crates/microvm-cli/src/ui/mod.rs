@@ -9,7 +9,7 @@ pub mod events;
 pub mod tests;
 pub mod views;
 
-pub use app::{App, Tab};
+pub use app::{App, ServeFocus, Tab};
 use events::{Event, EventHandler};
 
 use anyhow::{Context, Result};
@@ -20,7 +20,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use microvm_core::net::ApprovalStore;
-use microvm_core::StateManager;
+use microvm_core::{ServeConfig, ServeManager, StateManager};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Terminal;
@@ -121,7 +121,7 @@ async fn run_loop(
                     app.refresh_data();
                 }
                 Event::Key(key) => {
-                    handle_key(app, key);
+                    handle_key(app, key).await;
                 }
                 Event::Resize(_, _) => {}
             }
@@ -132,7 +132,7 @@ async fn run_loop(
 }
 
 /// Dispatches keyboard interactions based on the active tab and key pressed.
-fn handle_key(app: &mut App, key: KeyEvent) {
+async fn handle_key(app: &mut App, key: KeyEvent) {
     // Global navigation shortcuts
     match (key.code, key.modifiers) {
         (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
@@ -267,13 +267,52 @@ fn handle_key(app: &mut App, key: KeyEvent) {
             }
             _ => {}
         },
-        Tab::Serve => {
-            if key.code == KeyCode::Enter {
-                if let Some(s) = app.serve_items.get(app.selected_serve) {
-                    app.set_notification(format!("Inference Endpoint: {}", s.base_url));
-                }
+        Tab::Serve => match key.code {
+            KeyCode::Char('w') | KeyCode::Left | KeyCode::Right => {
+                app.toggle_serve_focus();
             }
-        }
+            KeyCode::Char('d') => {
+                app.refresh_discovered_models();
+                app.set_notification(format!(
+                    "🔍 Discovered {} models across local repositories",
+                    app.discovered_models.len()
+                ));
+            }
+            KeyCode::Enter | KeyCode::Char('s') => match app.serve_focus {
+                ServeFocus::Active => {
+                    if let Some(s) = app.serve_items.get(app.selected_serve) {
+                        app.set_notification(format!("Inference Endpoint: {}", s.base_url));
+                    }
+                }
+                ServeFocus::Discovered => {
+                    if let Some(m) = app.selected_discovered_model().cloned() {
+                        let used_ports: std::collections::HashSet<u16> =
+                            app.serve_items.iter().map(|s| s.host_port).collect();
+                        let port = (8000..8100)
+                            .find(|p| !used_ports.contains(p))
+                            .unwrap_or(8000);
+
+                        let mut cfg = ServeConfig::new(m.path.to_string_lossy().to_string());
+                        cfg.data_dir = Some(app.data_dir.clone());
+                        cfg.host_port = port;
+
+                        match ServeManager::start(&cfg, true, false).await {
+                            Ok(_) => {
+                                app.set_notification(format!(
+                                    "🚀 Launched serving microVM for '{}' on port {}",
+                                    m.name, port
+                                ));
+                                app.refresh_data();
+                            }
+                            Err(e) => {
+                                app.set_notification(format!("❌ Failed to serve model: {}", e));
+                            }
+                        }
+                    }
+                }
+            },
+            _ => {}
+        },
         Tab::Approvals => match key.code {
             KeyCode::Char('y') => {
                 if let Some(req) = app.selected_approval_req() {

@@ -4,6 +4,7 @@
 //! Centralized state model and navigation logic for the interactive terminal cockpit.
 
 use microvm_core::config::KrunConfig;
+use microvm_core::modelpack::{DiscoveredModel, ModelDiscovery};
 use microvm_core::net::PendingApproval;
 use microvm_core::{collect_process_stats, ProcessStats, StateManager, VmState, VmStatus};
 use std::collections::{HashMap, VecDeque};
@@ -75,6 +76,13 @@ pub struct ServeDisplayItem {
     pub vcpus: u8,
 }
 
+/// Focused sub-pane within the AI Serving tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServeFocus {
+    Active,
+    Discovered,
+}
+
 /// Root state holding all cockpit views, telemetry, and input selections.
 pub struct App {
     pub current_tab: Tab,
@@ -90,6 +98,9 @@ pub struct App {
     pub last_log_size: u64,
     pub serve_items: Vec<ServeDisplayItem>,
     pub selected_serve: usize,
+    pub discovered_models: Vec<DiscoveredModel>,
+    pub selected_discovered: usize,
+    pub serve_focus: ServeFocus,
     pub approvals: Vec<PendingApproval>,
     pub selected_approval: usize,
     pub notification: Option<(String, Instant)>,
@@ -113,6 +124,9 @@ impl App {
             last_log_size: 0,
             serve_items: Vec::new(),
             selected_serve: 0,
+            discovered_models: Vec::new(),
+            selected_discovered: 0,
+            serve_focus: ServeFocus::Discovered,
             approvals: Vec::new(),
             selected_approval: 0,
             notification: None,
@@ -144,11 +158,19 @@ impl App {
                     self.selected_instance = (self.selected_instance + 1) % self.instances.len();
                 }
             }
-            Tab::Serve => {
-                if !self.serve_items.is_empty() {
-                    self.selected_serve = (self.selected_serve + 1) % self.serve_items.len();
+            Tab::Serve => match self.serve_focus {
+                ServeFocus::Active => {
+                    if !self.serve_items.is_empty() {
+                        self.selected_serve = (self.selected_serve + 1) % self.serve_items.len();
+                    }
                 }
-            }
+                ServeFocus::Discovered => {
+                    if !self.discovered_models.is_empty() {
+                        self.selected_discovered =
+                            (self.selected_discovered + 1) % self.discovered_models.len();
+                    }
+                }
+            },
             Tab::Approvals => {
                 if !self.approvals.is_empty() {
                     self.selected_approval = (self.selected_approval + 1) % self.approvals.len();
@@ -172,15 +194,26 @@ impl App {
                     }
                 }
             }
-            Tab::Serve => {
-                if !self.serve_items.is_empty() {
-                    if self.selected_serve == 0 {
-                        self.selected_serve = self.serve_items.len() - 1;
-                    } else {
-                        self.selected_serve -= 1;
+            Tab::Serve => match self.serve_focus {
+                ServeFocus::Active => {
+                    if !self.serve_items.is_empty() {
+                        if self.selected_serve == 0 {
+                            self.selected_serve = self.serve_items.len() - 1;
+                        } else {
+                            self.selected_serve -= 1;
+                        }
                     }
                 }
-            }
+                ServeFocus::Discovered => {
+                    if !self.discovered_models.is_empty() {
+                        if self.selected_discovered == 0 {
+                            self.selected_discovered = self.discovered_models.len() - 1;
+                        } else {
+                            self.selected_discovered -= 1;
+                        }
+                    }
+                }
+            },
             Tab::Approvals => {
                 if !self.approvals.is_empty() {
                     if self.selected_approval == 0 {
@@ -219,6 +252,30 @@ impl App {
     /// Returns the currently selected approval request, if any.
     pub fn selected_approval_req(&self) -> Option<&PendingApproval> {
         self.approvals.get(self.selected_approval)
+    }
+
+    /// Returns the currently selected discovered model, if any.
+    pub fn selected_discovered_model(&self) -> Option<&DiscoveredModel> {
+        self.discovered_models.get(self.selected_discovered)
+    }
+
+    /// Toggles focus between active serving engines and discovered models.
+    pub fn toggle_serve_focus(&mut self) {
+        self.serve_focus = match self.serve_focus {
+            ServeFocus::Active => ServeFocus::Discovered,
+            ServeFocus::Discovered => ServeFocus::Active,
+        };
+    }
+
+    /// Discovers host models across Hugging Face, LM Studio, Ollama, and local directories.
+    pub fn refresh_discovered_models(&mut self) {
+        let models = ModelDiscovery::discover(&self.data_dir, &[]);
+        self.discovered_models = models;
+        if !self.discovered_models.is_empty()
+            && self.selected_discovered >= self.discovered_models.len()
+        {
+            self.selected_discovered = self.discovered_models.len() - 1;
+        }
     }
 
     /// Toggles auto-scroll follow mode in live logs.
@@ -316,7 +373,12 @@ impl App {
         // 2. Discover AI Serving Instances
         self.refresh_serving_items();
 
-        // 3. Refresh Approvals
+        // 3. Discover Host Models periodically (on tick 1 and every 30 ticks ~ 15s)
+        if self.tick_count == 1 || self.tick_count.is_multiple_of(30) {
+            self.refresh_discovered_models();
+        }
+
+        // 4. Refresh Approvals
         let approval_dir = self.data_dir.join("approvals");
         if let Ok(pending) = microvm_core::net::ApprovalStore::cli_list_pending(&approval_dir) {
             self.approvals = pending;

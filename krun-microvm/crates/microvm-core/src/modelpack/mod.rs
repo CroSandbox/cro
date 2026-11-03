@@ -5,11 +5,15 @@
 //!
 //! Provides model packaging, registry distribution, and microVM zero-copy execution.
 
+pub mod discover;
 pub mod engine;
+pub mod fit;
 pub mod pack;
 pub mod spec;
 
+pub use discover::{DiscoveredModel, ModelDiscovery, ModelSource};
 pub use engine::{CachedModelMetadata, ModelEngine};
+pub use fit::{FitVerdict, HardwareFit};
 pub use pack::{ModelPackOptions, ModelPacker};
 pub use spec::{
     ModelConfig, ModelDescriptor, ModelFileEntry, ModelFileRole, ModelFormat, ModelManifest,

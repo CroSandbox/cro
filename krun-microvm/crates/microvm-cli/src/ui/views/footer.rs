@@ -69,6 +69,12 @@ pub fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
                 Span::raw(" Next Tab  "),
                 Span::styled("[↑/↓]", Style::default().fg(Color::Cyan)),
                 Span::raw(" Select  "),
+                Span::styled("[w]", Style::default().fg(Color::Cyan)),
+                Span::raw(" Toggle Pane  "),
+                Span::styled("[d]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Rescan  "),
+                Span::styled("[s/Enter]", Style::default().fg(Color::Green)),
+                Span::raw(" Serve  "),
                 Span::styled("[q]", Style::default().fg(Color::Cyan)),
                 Span::raw(" Quit"),
             ]);
