@@ -30,8 +30,9 @@ pub use builder::{
 pub use bundle::OciBundle;
 pub use capability::{CapabilityPolicy, FsAccessMode};
 pub use compose::{
-    ComposeNetworkSpec, ComposeProject, ComposeProjectState, ComposeServiceState, ComposeSpec,
-    ComposeVolumeSpec, K8sMetadata, K8sMicroVmManifest, K8sMicroVmSpec, Manifest, ServiceSpec,
+    ComposeNetworkSpec, ComposeOverlayNetwork, ComposeProject, ComposeProjectState,
+    ComposeServiceState, ComposeSpec, ComposeVolumeSpec, K8sMetadata, K8sMicroVmManifest,
+    K8sMicroVmSpec, Manifest, OverlayEndpoint, ServiceSpec,
 };
 pub use domain::{
     extract_routing_keys, generate_404_html, list_active_domains, query_micro_dns, rank_port,

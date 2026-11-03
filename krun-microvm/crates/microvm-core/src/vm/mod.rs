@@ -14,7 +14,7 @@ pub use kernel::{detect_kernel_format, find_rosetta_path, parse_kernel_format};
 pub use runtime::MicroVm;
 
 pub use crate::types::{
-    ArtifactMount, BootPayload, CowWorkspace, DiskAttachment, FirmwarePayload, FreePageReportingMode,
-    FsOverlayEntry, KernelPayload, ModelAttachment, PortForward, RunnerConfig, VirtioFsMount,
-    VsockPort,
+    ArtifactMount, BootPayload, CowWorkspace, DiskAttachment, FirmwarePayload,
+    FreePageReportingMode, FsOverlayEntry, KernelPayload, ModelAttachment, PortForward,
+    RunnerConfig, VirtioFsMount, VsockPort,
 };

@@ -7,8 +7,9 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 pub use crate::types::{
-    ArtifactMount, BootPayload, CowWorkspace, DiskAttachment, FirmwarePayload, FreePageReportingMode,
-    FsOverlayEntry, KernelPayload, ModelAttachment, RunnerConfig, VirtioFsMount, VsockPort,
+    ArtifactMount, BootPayload, CowWorkspace, DiskAttachment, FirmwarePayload,
+    FreePageReportingMode, FsOverlayEntry, KernelPayload, ModelAttachment, RunnerConfig,
+    VirtioFsMount, VsockPort,
 };
 
 #[must_use = "MicroVmBuilder must be configured and executed by calling .run()"]
@@ -776,5 +777,9 @@ impl MicroVmBuilder {
 
     pub fn get_virtiofs_mounts(&self) -> &[VirtioFsMount] {
         &self.virtiofs_mounts
+    }
+
+    pub fn get_extra_hosts(&self) -> &[(String, String)] {
+        &self.extra_hosts
     }
 }

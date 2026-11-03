@@ -8,11 +8,13 @@
 //! - [`spec`]: Schema definitions and parsers for Docker Compose, Kubernetes Pod, and MicroVm CRD manifests.
 //! - [`state`]: State serialization structures for tracking active compose projects and services on disk.
 
+pub mod network;
 pub mod project;
 pub mod spec;
 pub mod state;
 
 // Re-exports for clean API ergonomics and backwards compatibility
+pub use network::{ComposeOverlayNetwork, OverlayEndpoint};
 pub use project::ComposeProject;
 pub use spec::{
     ComposeNetworkSpec, ComposeSpec, ComposeVolumeSpec, K8sContainerPort, K8sContainerSpec,

@@ -66,7 +66,10 @@ fn handle_setup_resolver(dns_port: u16) -> Result<()> {
 }
 
 async fn handle_resolve(domain: &str, dns_port: u16) -> Result<()> {
-    println!("🔍 Querying embedded Micro-DNS server at 127.0.0.1:{} for '{}'...", dns_port, domain);
+    println!(
+        "🔍 Querying embedded Micro-DNS server at 127.0.0.1:{} for '{}'...",
+        dns_port, domain
+    );
     match query_micro_dns("127.0.0.1", dns_port, domain).await {
         Ok(ip) => {
             println!("✅ Resolved '{}' -> {}", domain, ip);
@@ -162,7 +165,10 @@ async fn handle_start(
             pid, port
         );
         if !no_dns {
-            println!("🌐 Micro-DNS Server: 127.0.0.1:{} (*.cro.local -> 127.0.0.1)", dns_port);
+            println!(
+                "🌐 Micro-DNS Server: 127.0.0.1:{} (*.cro.local -> 127.0.0.1)",
+                dns_port
+            );
         }
         println!("🌐 Resolving: *.cro.local -> running microVMs");
         println!("👉 Inspect mappings with: cro domain list");

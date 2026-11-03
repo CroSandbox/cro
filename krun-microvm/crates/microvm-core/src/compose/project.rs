@@ -277,17 +277,26 @@ impl ComposeProject {
             }
         }
 
-        // Inject peer service names into /etc/hosts for seamless inter-service discovery
-        let mut extra_hosts = Vec::new();
-        for peer_name in self.spec.services.keys() {
-            if peer_name != service_name {
-                let peer_ip = self.service_ip(peer_name);
-                extra_hosts.push((peer_name.clone(), peer_ip));
-            }
-        }
+        // Overlay network & service discovery
+        let overlay = self.overlay_network();
+
+        // Inject peer service names, project-qualified domains, and aliases into /etc/hosts
+        let extra_hosts = overlay.hosts_entries_for(service_name);
         builder = builder.extra_hosts(extra_hosts);
 
+        // Inject 12-factor service discovery environment variables (<SVC>_HOST, <SVC>_PORT, <SVC>_URL)
+        for (k, v) in overlay.service_discovery_env() {
+            if !svc.env.contains_key(&k) {
+                builder = builder.env(&k, &v);
+            }
+        }
+
         Ok(builder)
+    }
+
+    /// Returns the active `ComposeOverlayNetwork` for this project.
+    pub fn overlay_network(&self) -> super::network::ComposeOverlayNetwork {
+        super::network::ComposeOverlayNetwork::from_project(&self.name, &self.spec)
     }
 
     fn parse_volume_mount(&self, vol_str: &str) -> Result<(PathBuf, String, bool)> {

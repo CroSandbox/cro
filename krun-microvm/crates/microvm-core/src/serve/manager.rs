@@ -27,7 +27,10 @@ pub struct ServeHandle {
 impl ServeHandle {
     /// Returns true if the serving microVM is currently auto-paused via scale-to-zero.
     pub fn is_paused(&self) -> bool {
-        self.gateway.as_ref().map(|g| g.is_paused()).unwrap_or(false)
+        self.gateway
+            .as_ref()
+            .map(|g| g.is_paused())
+            .unwrap_or(false)
     }
 
     /// Awaits the microVM process until it exits or is interrupted.
@@ -196,7 +199,10 @@ impl ServeManager {
         };
         let vm_id = vm.id().to_string();
 
-        let base_url = format!("http://{}:{}/v1", effective_config.host, effective_config.host_port);
+        let base_url = format!(
+            "http://{}:{}/v1",
+            effective_config.host, effective_config.host_port
+        );
         let chat_url = format!("{}/chat/completions", base_url);
         let models_url = format!("{}/models", base_url);
         let model_alias = effective_config.effective_model_name(&meta);

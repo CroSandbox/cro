@@ -322,10 +322,13 @@ pub async fn query_micro_dns(server_addr: &str, server_port: u16, domain: &str) 
         .with_context(|| format!("Failed to send DNS query to {}", target))?;
 
     let mut buf = [0u8; 512];
-    let (n, _) = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv_from(&mut buf))
-        .await
-        .context("Timed out waiting for DNS response")?
-        .context("Failed to receive DNS response")?;
+    let (n, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.recv_from(&mut buf),
+    )
+    .await
+    .context("Timed out waiting for DNS response")?
+    .context("Failed to receive DNS response")?;
 
     let resp = &buf[..n];
     if resp.len() < 12 {
@@ -379,8 +382,8 @@ mod tests {
             0x00, 0x00, // ANCOUNT
             0x00, 0x00, // NSCOUNT
             0x00, 0x00, // ARCOUNT
-            5, b'l', b'l', b'a', b'm', b'a', 3, b'c', b'r', b'o', 5, b'l', b'o', b'c', b'a',
-            b'l', 0, // QNAME
+            5, b'l', b'l', b'a', b'm', b'a', 3, b'c', b'r', b'o', 5, b'l', b'o', b'c', b'a', b'l',
+            0, // QNAME
             0x00, 0x01, // QTYPE = A
             0x00, 0x01, // QCLASS = IN
         ];

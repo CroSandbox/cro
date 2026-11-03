@@ -48,9 +48,7 @@ pub(crate) fn is_microvm_runner_process(pid: u32) -> bool {
         return false;
     }
     let path_str = String::from_utf8_lossy(&buf[..ret as usize]);
-    path_str.contains("microvm-runner")
-        || path_str.contains("sleep")
-        || path_str.contains("mock")
+    path_str.contains("microvm-runner") || path_str.contains("sleep") || path_str.contains("mock")
 }
 
 #[cfg(target_os = "linux")]

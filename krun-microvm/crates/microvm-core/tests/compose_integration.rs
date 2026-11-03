@@ -111,3 +111,33 @@ fn test_integration_manifest_not_found() {
     let result = Manifest::load_file(&missing_path);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_integration_overlay_network_and_service_discovery() {
+    let path = fixture_path("compose.yaml");
+    let temp_data = tempfile::tempdir().unwrap();
+    let project = ComposeProject::load(&path, Some(temp_data.path().to_path_buf()))
+        .expect("Failed to load compose fixture");
+
+    let overlay = project.overlay_network();
+    assert_eq!(overlay.endpoints.len(), 3);
+
+    // Verify resolution of services
+    let api_ep = overlay.endpoints.get("api").unwrap();
+    let db_ep = overlay.endpoints.get("db").unwrap();
+    let redis_ep = overlay.endpoints.get("redis").unwrap();
+
+    assert_eq!(overlay.resolve("db"), Some(db_ep.ip));
+    assert_eq!(overlay.resolve("api.cro.local"), Some(api_ep.ip));
+    assert_eq!(
+        overlay.resolve("redis.integration-test-suite.cro.local"),
+        Some(redis_ep.ip)
+    );
+
+    // Verify VM builder for 'api' receives peer hosts and 12-factor env vars
+    let api_builder = project.build_service_vm("api").unwrap();
+    let extra_hosts = api_builder.get_extra_hosts();
+    assert!(extra_hosts.iter().any(|(h, _)| h == "db"));
+    assert!(extra_hosts.iter().any(|(h, _)| h == "redis"));
+    assert!(!extra_hosts.iter().any(|(h, _)| h == "api")); // No self-shadowing
+}

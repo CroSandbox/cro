@@ -167,8 +167,7 @@ fn test_state_manager_resize_success() {
     };
     StateManager::save(dir.path(), &vm).unwrap();
 
-    let updated =
-        StateManager::resize(dir.path(), "vm-resize-test", Some(1024), Some(4)).unwrap();
+    let updated = StateManager::resize(dir.path(), "vm-resize-test", Some(1024), Some(4)).unwrap();
     assert_eq!(updated.memory_mib, Some(1024));
     assert_eq!(updated.vcpus, Some(4));
 
@@ -346,8 +345,7 @@ fn test_snapshot_and_restore_tar() {
     assert_eq!(manifest.original_id, "vm-snap-tar");
 
     // Restore from tar
-    let restored =
-        StateManager::restore(dir.path(), &tar_path, Some("vm-tar-restored")).unwrap();
+    let restored = StateManager::restore(dir.path(), &tar_path, Some("vm-tar-restored")).unwrap();
     assert_eq!(restored.id, "vm-tar-restored");
     let data = fs::read_to_string(restored.instance_dir.join("rootfs/app/data.json")).unwrap();
     assert_eq!(data, r#"{"model":"mistral"}"#);
