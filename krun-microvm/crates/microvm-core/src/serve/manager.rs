@@ -5,9 +5,10 @@
 
 use super::config::{ServeConfig, ServeEngine};
 use crate::modelpack::ModelEngine;
+use crate::state::StateManager;
 use crate::vm::MicroVm;
 use anyhow::{bail, Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Live handle to a running microVM inference server.
@@ -85,20 +86,78 @@ impl ServeManager {
             config.cpus, config.memory_mb, config.gpu_shm_size
         );
 
-        // 3. Build MicroVmBuilder
-        let mut builder = config
-            .to_microvm_builder(active_engine, &meta, &meta.path)
-            .with_context(|| "Failed to construct MicroVmBuilder for serving")?;
+        // 3. Check for warm-start snapshot if requested
+        let model_key = if !meta.digest.is_empty() {
+            &meta.digest
+        } else {
+            &meta.name
+        };
+        let cache_key = config.compute_warm_snapshot_key(model_key);
+        let snapshot_dir = data_dir.join("snapshots/serve").join(&cache_key);
 
-        if detach {
-            builder = builder.detach(true);
-        }
+        let (mut vm, is_warm_started) = if config.warm
+            && snapshot_dir.exists()
+            && snapshot_dir.join("snapshot.json").exists()
+        {
+            println!(
+                "⚡ Warm-start enabled: restoring from pre-warmed snapshot '{}'...",
+                cache_key
+            );
+            let warm_boot_start = std::time::Instant::now();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let target_id = format!("vm-warm-{}-{}", now.as_millis(), now.subsec_nanos());
 
-        // 4. Spawn microVM
-        let mut vm = builder
-            .run()
-            .await
-            .context("Failed to spawn serving microVM")?;
+            StateManager::restore(data_dir, &snapshot_dir, Some(&target_id))
+                .with_context(|| format!("Failed to restore warm snapshot '{}'", cache_key))?;
+
+            Self::sanitize_restored_rootfs(
+                &data_dir.join("instances").join(&target_id).join("rootfs"),
+            );
+
+            let mut builder = config
+                .to_microvm_builder(active_engine, &meta, &meta.path)
+                .with_context(|| "Failed to construct MicroVmBuilder for warm serving")?
+                .instance_id(&target_id);
+
+            if detach {
+                builder = builder.detach(true);
+            }
+
+            let vm = builder
+                .run()
+                .await
+                .context("Failed to spawn restored warm microVM")?;
+            let elapsed = warm_boot_start.elapsed();
+            println!(
+                "⚡ Warm microVM restored and booted in {:.2}ms (Instance ID: {}).",
+                elapsed.as_secs_f64() * 1000.0,
+                target_id
+            );
+            (vm, true)
+        } else {
+            if config.warm {
+                println!(
+                    "ℹ️  No warm snapshot found for key '{}'; falling back to cold boot.",
+                    cache_key
+                );
+            }
+
+            let mut builder = config
+                .to_microvm_builder(active_engine, &meta, &meta.path)
+                .with_context(|| "Failed to construct MicroVmBuilder for serving")?;
+
+            if detach {
+                builder = builder.detach(true);
+            }
+
+            let vm = builder
+                .run()
+                .await
+                .context("Failed to spawn serving microVM")?;
+            (vm, false)
+        };
         let vm_id = vm.id().to_string();
 
         let base_url = format!("http://{}:{}/v1", config.host, config.host_port);
@@ -119,6 +178,12 @@ impl ServeManager {
                 Some(&mut vm),
             )
             .await?;
+
+            if config.snapshot_on_ready && !is_warm_started {
+                if let Err(e) = Self::snapshot_warm_serve(data_dir, &vm_id, &cache_key) {
+                    eprintln!("⚠️  Failed to capture warm-start snapshot: {}", e);
+                }
+            }
 
             Self::print_summary_card(
                 model_alias,
@@ -219,6 +284,91 @@ impl ServeManager {
         }
     }
 
+    /// Captures a warm snapshot of a running inference microVM once it reaches ready state.
+    pub fn snapshot_warm_serve(data_dir: &Path, vm_id: &str, cache_key: &str) -> Result<PathBuf> {
+        let serve_snapshots_dir = data_dir.join("snapshots").join("serve");
+        std::fs::create_dir_all(&serve_snapshots_dir)?;
+
+        let target_snapshot = serve_snapshots_dir.join(cache_key);
+        let tmp_snapshot = serve_snapshots_dir.join(format!(".tmp-{}", cache_key));
+
+        if tmp_snapshot.exists() {
+            let _ = std::fs::remove_dir_all(&tmp_snapshot);
+        }
+
+        // If the microVM is actively running, pause it during snapshot capture to ensure consistency
+        let is_running = StateManager::find(data_dir, vm_id)?
+            .map(|vm| vm.is_process_alive())
+            .unwrap_or(false);
+
+        if is_running {
+            println!(
+                "📸 Freezing microVM '{}' to capture warm-start snapshot...",
+                vm_id
+            );
+            if let Err(e) = StateManager::pause(data_dir, vm_id) {
+                tracing::warn!("Failed to pause microVM '{}' before snapshot: {}", vm_id, e);
+            }
+        }
+
+        let snap_res = StateManager::snapshot(data_dir, vm_id, &tmp_snapshot);
+
+        // Always guarantee the microVM is resumed if it was running
+        if is_running {
+            if let Err(e) = StateManager::resume(data_dir, vm_id) {
+                eprintln!(
+                    "⚠️  Warning: Failed to resume microVM after snapshot: {}",
+                    e
+                );
+            }
+        }
+
+        snap_res
+            .with_context(|| format!("Failed to create snapshot at {}", tmp_snapshot.display()))?;
+
+        // Atomic commit of the snapshot directory
+        if target_snapshot.exists() {
+            let _ = std::fs::remove_dir_all(&target_snapshot);
+        }
+        std::fs::rename(&tmp_snapshot, &target_snapshot).with_context(|| {
+            format!(
+                "Failed to finalize snapshot directory to {}",
+                target_snapshot.display()
+            )
+        })?;
+
+        println!(
+            "✅ Warm-start snapshot captured successfully: {}",
+            target_snapshot.display()
+        );
+        Ok(target_snapshot)
+    }
+
+    /// Purges stale unix domain sockets, lockfiles, and PID files from a restored rootfs
+    /// so the inference server doesn't hit EADDRINUSE on startup.
+    pub fn sanitize_restored_rootfs(rootfs: &Path) {
+        let check_dirs = [
+            rootfs.join("tmp"),
+            rootfs.join("run"),
+            rootfs.join("var/run"),
+        ];
+        for dir in &check_dirs {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if name.ends_with(".sock")
+                            || name.ends_with(".pid")
+                            || name.ends_with(".lock")
+                        {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Displays the formatted endpoint summary card.
     pub fn print_summary_card(
         model_name: &str,
@@ -268,5 +418,43 @@ mod tests {
             "http://127.0.0.1:8000/v1/models",
             Some("secret-key"),
         );
+    }
+
+    #[test]
+    fn test_sanitize_restored_rootfs() {
+        let temp = tempfile::tempdir().unwrap();
+        let rootfs = temp.path().join("rootfs");
+        let tmp_dir = rootfs.join("tmp");
+        let run_dir = rootfs.join("run");
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        let sock_file = tmp_dir.join("vllm.sock");
+        let pid_file = run_dir.join("vllm.pid");
+        let lock_file = tmp_dir.join("inference.lock");
+        let regular_file = tmp_dir.join("model_weights.bin");
+
+        std::fs::write(&sock_file, "sock").unwrap();
+        std::fs::write(&pid_file, "1234").unwrap();
+        std::fs::write(&lock_file, "lock").unwrap();
+        std::fs::write(&regular_file, "weights").unwrap();
+
+        assert!(sock_file.exists());
+        assert!(pid_file.exists());
+        assert!(lock_file.exists());
+        assert!(regular_file.exists());
+
+        ServeManager::sanitize_restored_rootfs(&rootfs);
+
+        assert!(!sock_file.exists(), "stale socket should have been removed");
+        assert!(
+            !pid_file.exists(),
+            "stale pid file should have been removed"
+        );
+        assert!(
+            !lock_file.exists(),
+            "stale lock file should have been removed"
+        );
+        assert!(regular_file.exists(), "regular file must be preserved");
     }
 }

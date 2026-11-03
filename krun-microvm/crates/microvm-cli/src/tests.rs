@@ -445,6 +445,27 @@ fn test_cli_parse_serve_and_vllm() {
         }
         _ => panic!("Expected Commands::Vllm"),
     }
+
+    // 4. cro serve with warm-start snapshots
+    let warm_args = vec![
+        "cro",
+        "serve",
+        "llama-3.2-1b",
+        "--warm",
+        "--snapshot-on-ready",
+        "--warmup-snapshot-tag",
+        "v1-prod",
+    ];
+    let cli4 = Cli::try_parse_from(warm_args).unwrap();
+    match cli4.command {
+        Commands::Serve(args) => {
+            assert_eq!(args.model, "llama-3.2-1b");
+            assert!(args.warm);
+            assert!(args.snapshot_on_ready);
+            assert_eq!(args.warmup_snapshot_tag.as_deref(), Some("v1-prod"));
+        }
+        _ => panic!("Expected Commands::Serve"),
+    }
 }
 
 #[test]

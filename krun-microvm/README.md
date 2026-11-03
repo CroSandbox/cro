@@ -33,6 +33,43 @@ Whether you are building **AI coding agent sandboxes** (Claude, Gemini, Codex), 
 
 ---
 
+## 🏛️ Elephant-Goldfish Architectural Blueprint
+
+### System Overview
+`cro` is structured as a decoupled workspace separating low-level hypervisor primitives, core orchestration and state management, high-level CLI interfaces, and container ecosystem runtimes (containerd/Kubernetes). Each crate maintains explicit boundaries, invariants, and side effects documented in its contract README.
+
+### Subdirectories & System Boundaries
+- [`crates/microvm-core`](./crates/microvm-core/README.md): Core orchestration, state persistence, image building, AI model serving, and zero-trust proxying.
+- [`crates/microvm-cli`](./crates/microvm-cli/README.md): Unified CLI front-end (`cro` / `microvm`) and full-screen terminal UI Cockpit.
+- [`crates/microvm-runner`](./crates/microvm-runner/README.md): Dedicated hypervisor supervisor process managing individual VM contexts and IPC sockets.
+- [`crates/containerd-shim-krun`](./crates/containerd-shim-krun/README.md): Containerd CRI v2 runtime shim for Kubernetes microVM execution.
+- [`crates/krun-operator`](./crates/krun-operator/README.md): Kubernetes CRD controller managing declarative `krun.io/v1alpha1 MicroVm` custom resources.
+- [`crates/krun-sys`](./crates/krun-sys/README.md): Safe/unsafe Rust FFI bindings to the `libkrun` C virtualization engine.
+- [`crates/libgvproxy-sys`](./crates/libgvproxy-sys/README.md): Rust FFI bindings to user-mode `libgvproxy` networking.
+- [`sdks/python`](./sdks/python/README.md): Python Client SDK for programmatic microVM orchestration.
+- [`sdks/typescript`](./sdks/typescript/README.md): TypeScript/Node.js Client SDK.
+- [`sdks/go`](./sdks/go/README.md): Go Client SDK.
+- [`sdks/elixir`](./sdks/elixir/README.md): Elixir Client SDK.
+
+### Global Invariants
+- **Hardware Isolation Boundary**: Every running guest container executes inside an isolated hypervisor virtual machine (`Hypervisor.framework` on macOS, KVM on Linux) with separate page tables, kernel, and memory allocations.
+- **Archive Traversal Immunity**: All image extractions, file mounts, and snapshot archives must strictly enforce `sanitize_tar_path` and `ensure_no_symlink_parents` to prevent host file traversal.
+- **Fail-Safe VM Pausing**: Any lifecycle operation pausing guest vCPUs (such as snapshot capture) must guarantee process resumption on both error and success paths.
+- **Deterministic Serving Keying**: Warm-start snapshot fingerprints incorporate model digest, engine type, hardware allocation, GPU limits, and runtime arguments to guarantee that restored instances exactly match requested execution constraints.
+
+### Global Side Effects
+- **Local State Storage**: Persists microVM instances, cached layers, and snapshots under `~/.cache/krun-microvm/` (overridable via `--data-dir`).
+- **Host Network Forwarding**: Spawns user-space proxies and binds requested host TCP ports for guest communication.
+- **Kernel Virtualization**: Creates hardware hypervisor VM instances on the host system.
+
+### System Verification
+- Workspace Unit & Integration Tests: `cargo test --workspace`
+- Clippy Linter: `cargo clippy --all-targets -- -D warnings`
+- Code Formatter: `cargo fmt --all -- --check`
+- Security Audit: `cargo audit`
+
+---
+
 ## ⚡ Quickstart in 30 Seconds
 
 ### 1. One-Line Installation

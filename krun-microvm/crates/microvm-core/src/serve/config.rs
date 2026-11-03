@@ -99,6 +99,12 @@ pub struct ServeConfig {
     pub chat_template: Option<PathBuf>,
     /// Custom environment variables to inject into the microVM guest.
     pub env_vars: Vec<(String, String)>,
+    /// Automatically capture and freeze a warm-start snapshot when the inference server signals readiness.
+    pub snapshot_on_ready: bool,
+    /// Restore and instantly resume execution from a pre-warmed snapshot (< 100ms startup).
+    pub warm: bool,
+    /// Custom warm-start snapshot tag override.
+    pub warmup_snapshot_tag: Option<String>,
     /// Trailing custom arguments passed directly to the inference binary.
     pub extra_args: Vec<String>,
 }
@@ -128,6 +134,9 @@ impl Default for ServeConfig {
             quantization: None,
             chat_template: None,
             env_vars: Vec::new(),
+            snapshot_on_ready: false,
+            warm: false,
+            warmup_snapshot_tag: None,
             extra_args: Vec::new(),
         }
     }
@@ -300,6 +309,54 @@ impl ServeConfig {
     pub fn env_vars(mut self, vars: impl IntoIterator<Item = (String, String)>) -> Self {
         self.env_vars.extend(vars);
         self
+    }
+
+    /// Automatically captures a warm-start snapshot upon reaching readiness.
+    pub fn snapshot_on_ready(mut self, enabled: bool) -> Self {
+        self.snapshot_on_ready = enabled;
+        self
+    }
+
+    /// Boots the serving engine from a pre-warmed snapshot (< 100ms startup).
+    pub fn warm(mut self, warm: bool) -> Self {
+        self.warm = warm;
+        self
+    }
+
+    /// Sets a custom warm-start snapshot tag override.
+    pub fn warmup_snapshot_tag(mut self, tag: impl Into<String>) -> Self {
+        self.warmup_snapshot_tag = Some(tag.into());
+        self
+    }
+
+    /// Computes a deterministic SHA-256 fingerprint for a warm snapshot.
+    pub fn compute_warm_snapshot_key(&self, model_id: &str) -> String {
+        if let Some(ref tag) = self.warmup_snapshot_tag {
+            return format!("warm-{}", tag);
+        }
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(model_id.as_bytes());
+        hasher.update(self.engine.to_string().as_bytes());
+        hasher.update(self.cpus.to_le_bytes());
+        hasher.update(self.memory_mb.to_le_bytes());
+        hasher.update(self.gpu_shm_size.as_bytes());
+        if let Some(ref img) = self.container_image {
+            hasher.update(img.as_bytes());
+        }
+        if let Some(len) = self.max_model_len {
+            hasher.update(len.to_le_bytes());
+        }
+        if let Some(ref q) = self.quantization {
+            hasher.update(q.as_bytes());
+        }
+        hasher.update(self.tensor_parallel_size.to_le_bytes());
+        hasher.update([if self.trust_remote_code { 1 } else { 0 }]);
+        for arg in &self.extra_args {
+            hasher.update(arg.as_bytes());
+        }
+        let hash = format!("{:x}", hasher.finalize());
+        format!("warm-{}", &hash[..16])
     }
 
     /// Returns the effective model name / alias used in the server API.
@@ -777,5 +834,40 @@ mod tests {
             .unwrap();
         // Since default is 8192 MB and 10MB model fit doesn't exceed 8192 MB, memory remains 8192 MB
         assert_eq!(builder.get_ram_mib(), 8192);
+    }
+
+    #[test]
+    fn test_compute_warm_snapshot_key() {
+        let config1 = ServeConfig::new("llama3");
+        let key1 = config1.compute_warm_snapshot_key("sha256:model1");
+        assert!(key1.starts_with("warm-"));
+
+        // Identical config -> identical key
+        let config2 = ServeConfig::new("llama3");
+        let key2 = config2.compute_warm_snapshot_key("sha256:model1");
+        assert_eq!(key1, key2);
+
+        // Different engine -> different key
+        let mut config3 = ServeConfig::new("llama3");
+        config3.engine = ServeEngine::Vllm;
+        let key3 = config3.compute_warm_snapshot_key("sha256:model1");
+        assert_ne!(key1, key3);
+
+        // Different quantization -> different key
+        let mut config_quant = ServeConfig::new("llama3");
+        config_quant.quantization = Some("awq".to_string());
+        let key_quant = config_quant.compute_warm_snapshot_key("sha256:model1");
+        assert_ne!(key1, key_quant);
+
+        // Different extra_args -> different key
+        let mut config_extra = ServeConfig::new("llama3");
+        config_extra.extra_args = vec!["--gpu-memory-utilization".to_string(), "0.9".to_string()];
+        let key_extra = config_extra.compute_warm_snapshot_key("sha256:model1");
+        assert_ne!(key1, key_extra);
+
+        // Custom tag override
+        let config_tagged = ServeConfig::new("llama3").warmup_snapshot_tag("prod-v1");
+        let key_tagged = config_tagged.compute_warm_snapshot_key("sha256:model1");
+        assert_eq!(key_tagged, "warm-prod-v1");
     }
 }

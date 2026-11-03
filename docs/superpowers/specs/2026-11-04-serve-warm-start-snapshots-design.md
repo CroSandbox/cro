@@ -9,9 +9,9 @@
 
 ## 1. Intent & Context
 
-Serving LLMs and embedding models via `cro serve` (vLLM, llama.cpp, Uzu) inside hardware-isolated microVMs currently requires a "cold boot" phase lasting between 15 and 45 seconds. During cold boot, the microVM boots the Linux kernel, initializes the runtime, loads multi-gigabyte model weights into guest memory, warms up the KV cache, and compiles Metal/CUDA graph kernels.
+Serving LLMs and embedding models via `cro serve` (vLLM, llama.cpp, Uzu) inside hardware-isolated microVMs currently requires a "cold boot" phase lasting between 15 and 45 seconds. During cold boot, the microVM boots the Linux kernel, unpacks and initializes the container rootfs, downloads/verifies dependencies, compiles Metal/CUDA graph kernels, and prepares runtime caches.
 
-Because `cro` microVMs support Copy-on-Write state preservation and instant restoration via `StateManager`, we can capture the pre-initialized guest memory and filesystem state the moment the inference engine signals readiness (`/health` returns 200 OK). Subsequent runs can restore from this snapshot in `< 100ms`, achieving instant warm-start for developer workflows, serverless model invocation, and auto-scaling inference.
+Because `cro` microVMs support Copy-on-Write state preservation and instant restoration via `StateManager`, we can capture the pre-initialized rootfs state (containing model cache, virtual environments, and compiled graph kernels) the moment the inference engine signals readiness (`/health` returns 200 OK). Subsequent runs can restore from this snapshot instantaneously using APFS `clonefile` / Linux `reflink`, achieving rapid warm-start for developer workflows, serverless model invocation, and auto-scaling inference without repetitive container rootfs initialization.
 
 ---
 
@@ -67,19 +67,20 @@ sequenceDiagram
     alt Cold Boot with --snapshot-on-ready
         User->>CLI: cro serve --model llama3 --snapshot-on-ready
         CLI->>SM: start(config, snapshot_on_ready=true)
-        SM->>VM: Spawn microVM & load weights (15-30s)
+        SM->>VM: Spawn microVM & prepare weights (15-30s)
         VM-->>SM: HTTP 200 OK (/health)
         SM->>State: pause(vm_id)
-        SM->>State: snapshot(vm_id, cache_dir/<cache_key>)
+        SM->>State: snapshot(vm_id, cache_dir/.tmp_<cache_key>)
         SM->>State: resume(vm_id)
+        SM->>SM: Atomic rename to cache_dir/<cache_key>
         SM-->>User: Server Ready & Snapshot Cached
     else Warm Boot with --warm
         User->>CLI: cro serve --model llama3 --warm --port 8080
-        CLI->>SM: start_warm(config)
+        CLI->>SM: start(config, warm=true)
         SM->>State: restore(cache_dir/<cache_key>, new_vm_id)
-        SM->>State: update_port_forward(new_vm_id, host_port=8080)
-        SM->>State: resume(new_vm_id)
-        State-->>SM: vCPUs Running (< 100ms)
+        SM->>SM: Sanitize stale in-guest sockets & lockfiles
+        SM->>VM: MicroVmBuilder::run(instance_id=new_vm_id, port=8080)
+        VM-->>SM: Rootfs Reused (CoW clone) & Server Ready
         SM-->>User: Server Ready at http://127.0.0.1:8080/v1
     end
 ```

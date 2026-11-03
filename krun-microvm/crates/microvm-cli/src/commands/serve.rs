@@ -40,8 +40,17 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     }
     config.data_dir = args.data_dir;
     config.extra_args = args.extra_args;
+    config.snapshot_on_ready = args.snapshot_on_ready;
+    config.warm = args.warm;
+    config.warmup_snapshot_tag = args.warmup_snapshot_tag;
 
-    let wait = !args.no_wait && args.wait;
+    if args.no_wait && args.snapshot_on_ready {
+        anyhow::bail!(
+            "--snapshot-on-ready requires probing readiness before capturing snapshot; cannot be used with --no-wait"
+        );
+    }
+
+    let wait = args.snapshot_on_ready || (!args.no_wait && args.wait);
     let mut handle = ServeManager::start(&config, args.detach, wait).await?;
 
     if !args.detach {

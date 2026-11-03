@@ -276,3 +276,88 @@ async fn test_serve_vllm_plugins_and_alias_pipeline() {
         |(src, dest)| src == &chat_tpl && dest.to_str().unwrap() == "/etc/chat_template.jinja"
     ));
 }
+
+#[tokio::test]
+async fn test_serve_warm_start_snapshot_and_restore_workflow() {
+    use microvm_core::serve::manager::ServeManager;
+    use microvm_core::state::{StateManager, VmState, VmStatus};
+
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path().to_path_buf();
+
+    // 1. Setup mock running instance
+    let vm_id = "vm-serve-origin";
+    let instance_dir = data_dir.join("instances").join(vm_id);
+    let rootfs = instance_dir.join("rootfs");
+    fs::create_dir_all(rootfs.join("app")).unwrap();
+    fs::create_dir_all(rootfs.join("tmp")).unwrap();
+    fs::create_dir_all(rootfs.join("run")).unwrap();
+
+    fs::write(rootfs.join("app/model_weights.bin"), b"mock-weights-data").unwrap();
+    fs::write(rootfs.join("tmp/vllm.sock"), b"mock-socket").unwrap();
+    fs::write(rootfs.join("run/server.pid"), b"9999").unwrap();
+
+    let runner_cfg = serde_json::json!({
+        "root_path": rootfs,
+        "num_vcpus": 4,
+        "ram_mib": 8192,
+        "port_forwards": [{"host": 8000, "guest": 8000}],
+        "virtiofs_mounts": [],
+        "vsock_ports": []
+    });
+    fs::write(
+        instance_dir.join("runner_config.json"),
+        serde_json::to_string_pretty(&runner_cfg).unwrap(),
+    )
+    .unwrap();
+
+    let vm_state = VmState {
+        id: vm_id.to_string(),
+        pid: 0,
+        image: "vllm/vllm-openai:latest".to_string(),
+        created_at: 1000,
+        port_forwards: vec![],
+        instance_dir: instance_dir.clone(),
+        status: VmStatus::Stopped,
+        vcpus: Some(4),
+        memory_mib: Some(8192),
+    };
+    StateManager::save(&data_dir, &vm_state).unwrap();
+
+    // 2. Capture warm-start snapshot using ServeManager
+    let cache_key = "warm-test-model-key";
+    let snapshot_path =
+        ServeManager::snapshot_warm_serve(&data_dir, vm_id, cache_key).expect("Snapshot failed");
+
+    assert!(snapshot_path.exists());
+    assert!(snapshot_path.join("snapshot.json").exists());
+    assert!(snapshot_path.join("rootfs/app/model_weights.bin").exists());
+
+    // 3. Restore into a new instance
+    let restored_id = "vm-serve-warm-restored";
+    let restored_state = StateManager::restore(&data_dir, &snapshot_path, Some(restored_id))
+        .expect("Restore failed");
+    assert_eq!(restored_state.id, restored_id);
+
+    // 4. Sanitize stale sockets and pid files from restored rootfs
+    let restored_rootfs = restored_state.instance_dir.join("rootfs");
+    ServeManager::sanitize_restored_rootfs(&restored_rootfs);
+
+    assert!(
+        !restored_rootfs.join("tmp/vllm.sock").exists(),
+        "Stale socket must be removed"
+    );
+    assert!(
+        !restored_rootfs.join("run/server.pid").exists(),
+        "Stale PID file must be removed"
+    );
+    assert!(
+        restored_rootfs.join("app/model_weights.bin").exists(),
+        "Model weights must be preserved"
+    );
+
+    // 5. Build ServeConfig and verify port remapping
+    let serve_cfg = ServeConfig::new("mock-model").warm(true).port(9090);
+    assert_eq!(serve_cfg.host_port, 9090);
+    assert!(serve_cfg.warm);
+}

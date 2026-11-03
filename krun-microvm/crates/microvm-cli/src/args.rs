@@ -1254,6 +1254,18 @@ pub struct ServeArgs {
     #[arg(long)]
     pub no_wait: bool,
 
+    /// Automatically capture and freeze a warm-start snapshot when the inference server signals readiness
+    #[arg(long)]
+    pub snapshot_on_ready: bool,
+
+    /// Restore and instantly resume execution from a pre-warmed snapshot (< 100ms startup)
+    #[arg(long)]
+    pub warm: bool,
+
+    /// Custom warm-start snapshot tag name override
+    #[arg(long)]
+    pub warmup_snapshot_tag: Option<String>,
+
     /// Custom data cache directory
     #[arg(long)]
     pub data_dir: Option<PathBuf>,

@@ -738,13 +738,14 @@ impl StateManager {
             bail!("MicroVM rootfs path does not exist at {}", rootfs.display());
         }
 
-        let config_file = vm.instance_dir.join(".krun_config.json");
-        let runner_config = if config_file.exists() {
-            let data = fs::read_to_string(&config_file)?;
-            serde_json::from_str::<crate::types::RunnerConfig>(&data).ok()
-        } else {
-            None
-        };
+        let runner_config = [
+            vm.instance_dir.join("runner_config.json"),
+            vm.instance_dir.join(".krun_config.json"),
+        ]
+        .into_iter()
+        .find(|p| p.exists())
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|data| serde_json::from_str::<crate::types::RunnerConfig>(&data).ok());
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -847,9 +848,9 @@ impl StateManager {
         };
 
         if let Some(ref cfg) = manifest.runner_config {
-            let cfg_path = instances_dir.join(".krun_config.json");
             let json = serde_json::to_string_pretty(cfg)?;
-            fs::write(cfg_path, json)?;
+            fs::write(instances_dir.join("runner_config.json"), &json)?;
+            fs::write(instances_dir.join(".krun_config.json"), &json)?;
         }
 
         let new_state = VmState {
@@ -1203,6 +1204,20 @@ mod tests {
         fs::create_dir_all(rootfs.join("etc")).unwrap();
         fs::write(rootfs.join("etc/version.txt"), "1.0.0-snapshot").unwrap();
 
+        let runner_cfg_json = serde_json::json!({
+            "root_path": rootfs,
+            "num_vcpus": 4,
+            "ram_mib": 4096,
+            "port_forwards": [],
+            "virtiofs_mounts": [],
+            "vsock_ports": []
+        });
+        fs::write(
+            instance_dir.join("runner_config.json"),
+            serde_json::to_string_pretty(&runner_cfg_json).unwrap(),
+        )
+        .unwrap();
+
         let vm = VmState {
             id: "vm-snap-1".to_string(),
             pid: 0,
@@ -1233,6 +1248,10 @@ mod tests {
         let restored_ver =
             fs::read_to_string(restored.instance_dir.join("rootfs/etc/version.txt")).unwrap();
         assert_eq!(restored_ver, "1.0.0-snapshot");
+        assert!(restored.instance_dir.join("runner_config.json").exists());
+        assert!(restored.instance_dir.join(".krun_config.json").exists());
+        assert_eq!(restored.vcpus, Some(4));
+        assert_eq!(restored.memory_mib, Some(4096));
     }
 
     #[test]
