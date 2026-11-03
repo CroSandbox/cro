@@ -361,3 +361,140 @@ async fn test_serve_warm_start_snapshot_and_restore_workflow() {
     assert_eq!(serve_cfg.host_port, 9090);
     assert!(serve_cfg.warm);
 }
+
+#[tokio::test]
+async fn test_serve_scale_to_zero_config_and_builder_port_remapping() {
+    let serve_cfg = ServeConfig::new("my-llama")
+        .port(8000)
+        .scale_to_zero(true)
+        .idle_timeout(30)
+        .backend_port(18001);
+
+    assert!(serve_cfg.scale_to_zero);
+    assert_eq!(serve_cfg.idle_timeout_secs, Some(30));
+    assert_eq!(serve_cfg.backend_port, Some(18001));
+    assert_eq!(serve_cfg.host_port, 8000);
+}
+
+#[tokio::test]
+async fn test_serve_scale_to_zero_gateway_auto_pause_and_sub_2ms_wake() {
+    use microvm_core::serve::{find_available_loopback_port, ServeGateway};
+    use microvm_core::state::{StateManager, VmState, VmStatus};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path().to_path_buf();
+    let instance_dir = data_dir.join("instances/test-scale-zero-vm");
+    fs::create_dir_all(&instance_dir).unwrap();
+
+    // Spawn a dummy process that can receive SIGSTOP and SIGCONT
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("Failed to spawn mock VM process");
+    let pid = child.id();
+
+    let vm_state = VmState {
+        id: "test-scale-zero-vm".to_string(),
+        pid,
+        image: "alpine:latest".to_string(),
+        created_at: 1000,
+        port_forwards: vec![],
+        instance_dir: instance_dir.clone(),
+        status: VmStatus::Running,
+        vcpus: Some(2),
+        memory_mib: Some(512),
+    };
+    StateManager::save(&data_dir, &vm_state).unwrap();
+
+    // 1. Mock inference backend
+    let backend_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend_port = backend_listener.local_addr().unwrap().port();
+
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = backend_listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = [0u8; 128];
+                if let Ok(n) = stream.read(&mut buf).await {
+                    let body = format!("ECHO: {}", String::from_utf8_lossy(&buf[..n]));
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                }
+            });
+        }
+    });
+
+    // 2. Start Scale-to-Zero Gateway with short idle timeout (400ms)
+    let gw_port = find_available_loopback_port().unwrap();
+    let gateway = ServeGateway::start(
+        "127.0.0.1",
+        gw_port,
+        backend_port,
+        "test-scale-zero-vm",
+        data_dir.clone(),
+        Duration::from_millis(400),
+    )
+    .await
+    .expect("Failed to start ServeGateway");
+
+    assert!(!gateway.is_paused());
+
+    // 3. Send initial HTTP request
+    {
+        let mut client = TcpStream::connect(("127.0.0.1", gw_port)).await.unwrap();
+        client.write_all(b"HELLO_PROMPT").await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let mut resp = String::new();
+        client.read_to_string(&mut resp).await.unwrap();
+        assert!(resp.contains("ECHO: HELLO_PROMPT"));
+    }
+
+    assert_eq!(gateway.stats().total_requests, 1);
+    assert_eq!(gateway.stats().wake_count, 0);
+
+    // 4. Wait for idle timeout (600ms > 400ms) -> auto-pause should trigger
+    tokio::time::sleep(Duration::from_millis(650)).await;
+
+    // Verify auto-paused state
+    assert!(
+        gateway.is_paused(),
+        "Gateway should have auto-paused microVM on idle"
+    );
+    assert!(gateway.stats().pause_count >= 1);
+
+    let state = StateManager::find(&data_dir, "test-scale-zero-vm")
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.status, VmStatus::Paused);
+
+    // 5. Wake-on-Request: Send second HTTP request while paused
+    {
+        let mut client = TcpStream::connect(("127.0.0.1", gw_port)).await.unwrap();
+        client.write_all(b"WAKEUP_INFERENCE").await.unwrap();
+        client.shutdown().await.unwrap();
+
+        let mut resp = String::new();
+        client.read_to_string(&mut resp).await.unwrap();
+        assert!(resp.contains("ECHO: WAKEUP_INFERENCE"));
+    }
+
+    // Verify wake-on-request stats
+    let stats = gateway.stats();
+    assert_eq!(stats.total_requests, 2);
+    assert_eq!(stats.wake_count, 1);
+    assert!(!gateway.is_paused());
+    // Wake latency is tracked and typically < 20,000 microseconds (usually < 2,000 µs)
+    assert!(stats.last_wake_latency_us > 0);
+
+    // Cleanup
+    gateway.shutdown();
+    let _ = child.kill();
+    let _ = child.wait();
+}

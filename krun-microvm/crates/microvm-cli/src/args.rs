@@ -1273,6 +1273,14 @@ pub struct ServeArgs {
     /// Additional trailing arguments passed directly to the inference server
     #[arg(last = true)]
     pub extra_args: Vec<String>,
+
+    /// Enable scale-to-zero (auto-pause on idle, sub-2ms SIGCONT wake on HTTP request)
+    #[arg(long)]
+    pub scale_to_zero: bool,
+
+    /// Inactivity idle timeout before auto-pausing microVM in seconds (default: 60)
+    #[arg(long, default_value_t = 60)]
+    pub idle_timeout: u64,
 }
 
 #[derive(Subcommand, Debug, Clone)]

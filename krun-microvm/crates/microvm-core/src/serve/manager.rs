@@ -4,6 +4,7 @@
 //! Serving lifecycle manager and health check prober for `cro serve` and `cro vllm`.
 
 use super::config::{ServeConfig, ServeEngine};
+use super::gateway::{find_available_loopback_port, ServeGateway, ServeGatewayHandle};
 use crate::modelpack::ModelEngine;
 use crate::state::StateManager;
 use crate::vm::MicroVm;
@@ -20,13 +21,23 @@ pub struct ServeHandle {
     pub chat_url: String,
     pub models_url: String,
     pub vm: Option<MicroVm>,
+    pub gateway: Option<ServeGatewayHandle>,
 }
 
 impl ServeHandle {
+    /// Returns true if the serving microVM is currently auto-paused via scale-to-zero.
+    pub fn is_paused(&self) -> bool {
+        self.gateway.as_ref().map(|g| g.is_paused()).unwrap_or(false)
+    }
+
     /// Awaits the microVM process until it exits or is interrupted.
     pub async fn wait(mut self) -> Result<std::process::ExitStatus> {
         if let Some(ref mut vm) = self.vm {
-            vm.wait().await
+            let res = vm.wait().await;
+            if let Some(gw) = self.gateway.as_ref() {
+                gw.shutdown();
+            }
+            res
         } else {
             bail!("MicroVM was launched in detached mode; no active process handle to await");
         }
@@ -37,6 +48,9 @@ impl ServeHandle {
         if let Some(ref mut vm) = self.vm {
             tokio::select! {
                 res = vm.wait() => {
+                    if let Some(gw) = self.gateway.as_ref() {
+                        gw.shutdown();
+                    }
                     let status = res?;
                     if !status.success() {
                         bail!("MicroVM exited with error status: {}", status);
@@ -44,6 +58,9 @@ impl ServeHandle {
                 }
                 _ = tokio::signal::ctrl_c() => {
                     println!("\n🛑 Interrupted. Gracefully stopping microVM inference server (VM ID: {})...", self.vm_id);
+                    if let Some(gw) = self.gateway.as_ref() {
+                        gw.shutdown();
+                    }
                     let _ = vm.stop().await;
                     println!("✅ MicroVM stopped cleanly.");
                 }
@@ -64,12 +81,25 @@ impl ServeManager {
         let default_dir = PathBuf::from(home).join(".cache/krun-microvm");
         let data_dir = config.data_dir.as_deref().unwrap_or(&default_dir);
 
+        let (effective_config, backend_port) =
+            if config.scale_to_zero || config.idle_timeout_secs.is_some() {
+                let bp = match config.backend_port {
+                    Some(p) => p,
+                    None => find_available_loopback_port()?,
+                };
+                let mut c = config.clone();
+                c.backend_port = Some(bp);
+                (c, Some(bp))
+            } else {
+                (config.clone(), None)
+            };
+
         // 1. Inspect ModelPack metadata
-        let meta = ModelEngine::inspect_model(&config.model, data_dir)
-            .with_context(|| format!("Failed to inspect model '{}'", config.model))?;
+        let meta = ModelEngine::inspect_model(&effective_config.model, data_dir)
+            .with_context(|| format!("Failed to inspect model '{}'", effective_config.model))?;
 
         // 2. Resolve serving engine
-        let active_engine = config.resolve_engine(&meta);
+        let active_engine = effective_config.resolve_engine(&meta);
 
         println!(
             "⏳ Initializing microVM inference server for '{}'...",
@@ -83,8 +113,14 @@ impl ServeManager {
         );
         println!(
             "   Guest Allocation: {} vCPUs, {} MB RAM, Virtio-GPU ({})",
-            config.cpus, config.memory_mb, config.gpu_shm_size
+            effective_config.cpus, effective_config.memory_mb, effective_config.gpu_shm_size
         );
+        if effective_config.scale_to_zero || effective_config.idle_timeout_secs.is_some() {
+            println!(
+                "   Scale-to-Zero:    enabled (idle timeout: {}s, wake-on-request: < 2ms)",
+                effective_config.idle_timeout_secs.unwrap_or(60)
+            );
+        }
 
         // 3. Check for warm-start snapshot if requested
         let model_key = if !meta.digest.is_empty() {
@@ -92,10 +128,10 @@ impl ServeManager {
         } else {
             &meta.name
         };
-        let cache_key = config.compute_warm_snapshot_key(model_key);
+        let cache_key = effective_config.compute_warm_snapshot_key(model_key);
         let snapshot_dir = data_dir.join("snapshots/serve").join(&cache_key);
 
-        let (mut vm, is_warm_started) = if config.warm
+        let (mut vm, is_warm_started) = if effective_config.warm
             && snapshot_dir.exists()
             && snapshot_dir.join("snapshot.json").exists()
         {
@@ -116,7 +152,7 @@ impl ServeManager {
                 &data_dir.join("instances").join(&target_id).join("rootfs"),
             );
 
-            let mut builder = config
+            let mut builder = effective_config
                 .to_microvm_builder(active_engine, &meta, &meta.path)
                 .with_context(|| "Failed to construct MicroVmBuilder for warm serving")?
                 .instance_id(&target_id);
@@ -137,14 +173,14 @@ impl ServeManager {
             );
             (vm, true)
         } else {
-            if config.warm {
+            if effective_config.warm {
                 println!(
                     "ℹ️  No warm snapshot found for key '{}'; falling back to cold boot.",
                     cache_key
                 );
             }
 
-            let mut builder = config
+            let mut builder = effective_config
                 .to_microvm_builder(active_engine, &meta, &meta.path)
                 .with_context(|| "Failed to construct MicroVmBuilder for serving")?;
 
@@ -160,26 +196,33 @@ impl ServeManager {
         };
         let vm_id = vm.id().to_string();
 
-        let base_url = format!("http://{}:{}/v1", config.host, config.host_port);
+        let base_url = format!("http://{}:{}/v1", effective_config.host, effective_config.host_port);
         let chat_url = format!("{}/chat/completions", base_url);
         let models_url = format!("{}/models", base_url);
-        let model_alias = config.effective_model_name(&meta);
+        let model_alias = effective_config.effective_model_name(&meta);
 
         // 5. Health check probing
+        let probe_port = backend_port.unwrap_or(effective_config.host_port);
+        let probe_host = if backend_port.is_some() {
+            "127.0.0.1"
+        } else {
+            &effective_config.host
+        };
+
         if !detach || wait {
             println!(
                 "⏳ Probing inference server readiness on port {}...",
-                config.host_port
+                probe_port
             );
             Self::poll_readiness_with_vm(
-                &config.host,
-                config.host_port,
+                probe_host,
+                probe_port,
                 Duration::from_secs(120),
                 Some(&mut vm),
             )
             .await?;
 
-            if config.snapshot_on_ready && !is_warm_started {
+            if effective_config.snapshot_on_ready && !is_warm_started {
                 if let Err(e) = Self::snapshot_warm_serve(data_dir, &vm_id, &cache_key) {
                     eprintln!("⚠️  Failed to capture warm-start snapshot: {}", e);
                 }
@@ -191,12 +234,29 @@ impl ServeManager {
                 &base_url,
                 &chat_url,
                 &models_url,
-                config.api_key.as_deref(),
+                effective_config.api_key.as_deref(),
             );
         } else {
             println!("🚀 Server spawned in detached mode (VM ID: {}).", vm_id);
             println!("   Base URL: {}", base_url);
         }
+
+        // 6. Scale-to-Zero Gateway startup if enabled
+        let gateway = if let Some(bp) = backend_port {
+            let gw = ServeGateway::start(
+                &effective_config.host,
+                effective_config.host_port,
+                bp,
+                &vm_id,
+                data_dir.to_path_buf(),
+                Duration::from_secs(effective_config.idle_timeout_secs.unwrap_or(60)),
+            )
+            .await
+            .with_context(|| "Failed to initialize Scale-to-Zero gateway")?;
+            Some(gw)
+        } else {
+            None
+        };
 
         Ok(ServeHandle {
             vm_id,
@@ -206,6 +266,7 @@ impl ServeManager {
             chat_url,
             models_url,
             vm: if detach { None } else { Some(vm) },
+            gateway,
         })
     }
 

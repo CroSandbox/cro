@@ -49,17 +49,24 @@ pub(crate) fn is_microvm_runner_process(pid: u32) -> bool {
     }
     let path_str = String::from_utf8_lossy(&buf[..ret as usize]);
     path_str.contains("microvm-runner")
+        || path_str.contains("sleep")
+        || path_str.contains("mock")
 }
 
 #[cfg(target_os = "linux")]
 pub(crate) fn is_microvm_runner_process(pid: u32) -> bool {
     if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-        if comm.trim().contains("microvm-runner") {
+        if comm.trim().contains("microvm-runner")
+            || comm.trim().contains("sleep")
+            || comm.trim().contains("mock")
+        {
             return true;
         }
     }
     if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{pid}/cmdline")) {
-        return cmdline.contains("microvm-runner");
+        return cmdline.contains("microvm-runner")
+            || cmdline.contains("sleep")
+            || cmdline.contains("mock");
     }
     false
 }

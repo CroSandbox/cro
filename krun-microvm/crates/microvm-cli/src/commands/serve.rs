@@ -43,6 +43,11 @@ pub async fn handle_serve(args: ServeArgs) -> Result<()> {
     config.snapshot_on_ready = args.snapshot_on_ready;
     config.warm = args.warm;
     config.warmup_snapshot_tag = args.warmup_snapshot_tag;
+    config.scale_to_zero = args.scale_to_zero;
+    if args.scale_to_zero || args.idle_timeout != 60 {
+        config.idle_timeout_secs = Some(args.idle_timeout);
+        config.scale_to_zero = true;
+    }
 
     if args.no_wait && args.snapshot_on_ready {
         anyhow::bail!(

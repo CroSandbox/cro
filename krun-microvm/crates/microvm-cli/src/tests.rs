@@ -466,6 +466,24 @@ fn test_cli_parse_serve_and_vllm() {
         }
         _ => panic!("Expected Commands::Serve"),
     }
+
+    // 5. cro serve with scale-to-zero and idle timeout
+    let scale_zero_args = vec![
+        "cro",
+        "serve",
+        "llama-3.2-1b",
+        "--scale-to-zero",
+        "--idle-timeout",
+        "120",
+    ];
+    let cli5 = Cli::try_parse_from(scale_zero_args).unwrap();
+    match cli5.command {
+        Commands::Serve(args) => {
+            assert!(args.scale_to_zero);
+            assert_eq!(args.idle_timeout, 120);
+        }
+        _ => panic!("Expected Commands::Serve"),
+    }
 }
 
 #[test]

@@ -62,7 +62,10 @@ pub use preflight::{CheckResult, Preflight};
 pub use protocol::{ControlMessage, MessagePayload, CURRENT_PROTOCOL_VERSION};
 pub use rootfs::clone_rootfs;
 pub use secrets::{CredentialScope, ScopeAuthorizer, VaultResolver};
-pub use serve::{ServeConfig, ServeEngine, ServeHandle, ServeManager};
+pub use serve::{
+    find_available_loopback_port, GatewayStatsSnapshot, ServeConfig, ServeEngine, ServeGateway,
+    ServeGatewayHandle, ServeHandle, ServeManager,
+};
 pub use state::{SnapshotManifest, StateManager, VmState, VmStatus};
 pub use tty::RawModeGuard;
 pub use types::{

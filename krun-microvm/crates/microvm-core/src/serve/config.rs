@@ -107,6 +107,12 @@ pub struct ServeConfig {
     pub warmup_snapshot_tag: Option<String>,
     /// Trailing custom arguments passed directly to the inference binary.
     pub extra_args: Vec<String>,
+    /// Enable scale-to-zero with automatic pausing on idle and sub-2ms wake-on-request.
+    pub scale_to_zero: bool,
+    /// Inactivity timeout in seconds before auto-pausing the microVM.
+    pub idle_timeout_secs: Option<u64>,
+    /// Internal backend loopback port forwarded to the guest inference server when scale-to-zero gateway is active.
+    pub backend_port: Option<u16>,
 }
 
 impl Default for ServeConfig {
@@ -138,6 +144,9 @@ impl Default for ServeConfig {
             warm: false,
             warmup_snapshot_tag: None,
             extra_args: Vec::new(),
+            scale_to_zero: false,
+            idle_timeout_secs: None,
+            backend_port: None,
         }
     }
 }
@@ -326,6 +335,25 @@ impl ServeConfig {
     /// Sets a custom warm-start snapshot tag override.
     pub fn warmup_snapshot_tag(mut self, tag: impl Into<String>) -> Self {
         self.warmup_snapshot_tag = Some(tag.into());
+        self
+    }
+
+    /// Enables scale-to-zero with automatic pausing on idle and sub-2ms wake-on-request.
+    pub fn scale_to_zero(mut self, enabled: bool) -> Self {
+        self.scale_to_zero = enabled;
+        self
+    }
+
+    /// Sets inactivity timeout in seconds before auto-pausing the microVM.
+    pub fn idle_timeout(mut self, timeout_secs: u64) -> Self {
+        self.idle_timeout_secs = Some(timeout_secs);
+        self.scale_to_zero = true;
+        self
+    }
+
+    /// Sets internal backend loopback port forwarded to the guest when scale-to-zero gateway is used.
+    pub fn backend_port(mut self, port: u16) -> Self {
+        self.backend_port = Some(port);
         self
     }
 
@@ -545,11 +573,12 @@ impl ServeConfig {
             self.memory_mb
         };
 
+        let effective_host_port = self.backend_port.unwrap_or(self.host_port);
         let mut builder = MicroVmBuilder::new(image)
             .cpus(self.cpus)
             .memory_mb(effective_memory_mb)
             .cmd(cmd)
-            .port_forward(self.host_port, 8000)
+            .port_forward(effective_host_port, 8000)
             .model(
                 model_path.to_string_lossy(),
                 Some(format!("/models/{}", meta.name)),
