@@ -10,7 +10,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)%20%7C%20Linux%20(KVM)-black.svg?style=for-the-badge&logo=apple)](https://github.com/CroSandbox/cro)
 [![Rust](https://img.shields.io/badge/rust-1.80%2B-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-238%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
+[![Tests](https://img.shields.io/badge/tests-256%20passed-success.svg?style=for-the-badge&logo=rust)](https://github.com/CroSandbox/cro)
 [![Cold Boot](https://img.shields.io/badge/boot_time-%3C100ms-success.svg?style=for-the-badge&logo=lightning)](https://github.com/CroSandbox/cro)
 [![Compose](https://img.shields.io/badge/orchestration-Docker%20Compose%20%7C%20K8s%20CRD-purple.svg?style=for-the-badge&logo=docker)](examples/krun-compose.yaml)
 
@@ -140,6 +140,43 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 # Or launch with strict vLLM engine, 16 GB RAM, and 8 vCPUs:
 cro vllm serve mistralai/Mistral-7B-v0.1 --engine vllm -m 16384 -c 8
+```
+
+### 10. Apple Silicon Rosetta 2 for Linux (`--rosetta` / `--platform linux/amd64`)
+```bash
+# Run x86_64 / amd64 Linux containers seamlessly on Apple Silicon via VirtioFS + binfmt_misc:
+cro run --rosetta --platform linux/amd64 alpine:latest -- uname -m
+# x86_64
+```
+
+### 11. Automatic Local Domain Ingress Router (`*.cro.local`)
+```bash
+# Start background loopback reverse router:
+cro domain start -d
+
+# Running microVMs and Compose services are automatically accessible:
+# http://<name>.cro.local or http://<service>.<project>.cro.local
+curl http://llama.cro.local:8080/v1/models
+
+# Inspect active domain mappings:
+cro domain list
+```
+
+### 12. Persistent Linux Developer Workstations (`cro machine`)
+```bash
+# Create an instant persistent workstation (Ubuntu, Debian, Fedora, Alpine, Arch, Rocky):
+cro machine create dev --distro ubuntu -c 4 -m 4096
+
+# Open an interactive login shell with host $(USER) and /Users path parity:
+cro machine shell dev
+
+# Run one-off commands inside the machine:
+cro machine shell dev -- uname -a
+
+# Manage persistent workstations:
+cro machine list
+cro machine stop dev
+cro machine start dev
 ```
 
 ---
@@ -1418,6 +1455,8 @@ EOF
 | **`model`** | `cro model pull / list / info / pack` | Manage AI/ML models conforming to CNCF ModelPack Spec with zero-copy DAX |
 | **`serve`** | `cro serve <model> [-e auto|vllm|llamacpp|uzu] [-p <port>] [-d]` | Serve AI models via OpenAI-compatible API with smart auto-dispatch and zero-copy DAX |
 | **`vllm`** | `cro vllm serve <model> [options]` | Dedicated CLI alias for model serving with vLLM, llama.cpp, or uzu engines |
+| **`domain`** | `cro domain <start|list|stop> [-p <port>] [-d]` | Automatic local domain ingress reverse router (`*.cro.local` -> running microVMs) |
+| **`machine`** | `cro machine <create|shell|list|start|stop|rm> [NAME]` | Persistent Linux developer workstations with macOS host user & path parity |
 | **`containerd`**| `cro containerd install / status` | Manage containerd v2 runtime shim (`containerd-shim-krun-v2`) |
 | **`preflight`** | `cro preflight` | Run hypervisor preflight checks (macOS Hypervisor.framework / Linux KVM) |
 | **`info`** | `cro info` | Display host hypervisor capabilities, cache size, and system state |

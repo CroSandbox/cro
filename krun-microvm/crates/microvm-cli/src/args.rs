@@ -216,6 +216,14 @@ pub struct RunArgs {
     #[arg(long = "shm-size")]
     pub shm_size: Option<String>,
 
+    /// Enable Apple Silicon Rosetta 2 for Linux x86_64 ELF execution
+    #[arg(long)]
+    pub rosetta: bool,
+
+    /// Target architecture platform (e.g. linux/amd64, linux/arm64)
+    #[arg(long)]
+    pub platform: Option<String>,
+
     /// Optional command to override ENTRYPOINT/CMD
     #[arg(last = true)]
     pub cmd: Vec<String>,
@@ -673,6 +681,18 @@ pub enum Commands {
     Approval {
         #[command(subcommand)]
         command: ApprovalCommands,
+    },
+
+    /// Manage automatic local domain ingress routing (*.cro.local)
+    Domain {
+        #[command(subcommand)]
+        command: DomainCommands,
+    },
+
+    /// Manage persistent Linux developer workstations
+    Machine {
+        #[command(subcommand)]
+        command: MachineCommands,
     },
 }
 
@@ -1206,4 +1226,139 @@ pub struct ServeArgs {
 pub enum VllmCommands {
     /// Serve a ModelPack using the vLLM engine
     Serve(Box<ServeArgs>),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DomainCommands {
+    /// Start the local domain ingress reverse router
+    Start {
+        /// Listening port on host (default: 8080, or 80 if permitted)
+        #[arg(short = 'p', long, default_value_t = 8080)]
+        port: u16,
+
+        /// Bind address (defaults to 0.0.0.0 on macOS or 127.0.0.1 on Linux)
+        #[arg(long)]
+        addr: Option<String>,
+
+        /// Run domain router in background as a daemon
+        #[arg(short = 'd', long)]
+        detach: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// List active domain mappings and target microVMs
+    #[command(name = "ls", alias = "list")]
+    List {
+        /// Format output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Stop the background domain ingress router
+    Stop {
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum MachineCommands {
+    /// Create and provision a new persistent Linux developer machine
+    Create {
+        /// Name of the machine (letters, digits, dashes)
+        name: String,
+
+        /// Linux distribution (ubuntu, debian, alpine, fedora, arch, rocky, opensuse; default: ubuntu)
+        #[arg(long, default_value = "ubuntu")]
+        distro: String,
+
+        /// Custom container image to use instead of distribution default
+        #[arg(long)]
+        image: Option<String>,
+
+        /// Number of virtual CPUs
+        #[arg(short = 'c', long)]
+        cpus: Option<u8>,
+
+        /// RAM in MiB
+        #[arg(short = 'm', long)]
+        memory: Option<u32>,
+
+        /// Enable Apple Silicon Rosetta 2 x86_64 emulation
+        #[arg(long)]
+        rosetta: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Open an interactive login shell inside the machine, or run a one-off command
+    Shell {
+        /// Name of the machine
+        name: String,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Command and arguments to execute inside the machine (defaults to login shell)
+        #[arg(last = true)]
+        cmd: Vec<String>,
+    },
+
+    /// List all persistent developer machines and their statuses
+    #[command(name = "ls", alias = "list")]
+    List {
+        /// Format output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Start a stopped machine
+    Start {
+        /// Name of the machine
+        name: String,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Stop a running machine
+    Stop {
+        /// Name of the machine
+        name: String,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
+
+    /// Remove a machine and its persistent storage
+    #[command(name = "rm", alias = "delete")]
+    Rm {
+        /// Name of the machine
+        name: String,
+
+        /// Force removal even if running
+        #[arg(short = 'f', long)]
+        force: bool,
+
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+    },
 }

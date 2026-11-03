@@ -4,8 +4,10 @@ pub mod bundle;
 pub mod capability;
 pub mod compose;
 pub mod config;
+pub mod domain;
 pub mod error;
 pub mod exec;
+pub mod machine;
 pub mod metrics;
 pub mod modelpack;
 pub mod net;
@@ -31,7 +33,16 @@ pub use compose::{
     ComposeNetworkSpec, ComposeProject, ComposeProjectState, ComposeServiceState, ComposeSpec,
     ComposeVolumeSpec, K8sMetadata, K8sMicroVmManifest, K8sMicroVmSpec, Manifest, ServiceSpec,
 };
+pub use domain::{
+    extract_routing_keys, generate_404_html, list_active_domains, rank_port, resolve_domain,
+    run_domain_router, sanitize_domain_label, select_best_forward_host_port, DomainMapping,
+    DomainRouterConfig, NOT_WEB, WEB_PORTS,
+};
 pub use error::{ComposeError, MicroVmError, NetError, SecurityError, StateError, VmError};
+pub use machine::{
+    generate_machine_init_script, get_host_user_info, resolve_distro_image, validate_machine_name,
+    MachineConfig, MachineManager, DISTRO_CATALOG,
+};
 
 pub use config::{parse_size_to_bytes, KrunConfig, OciConfig};
 pub use exec::{exec_in_guest_rootfs, exec_in_microvm, ExecRequest, ExecResponse};

@@ -10,8 +10,10 @@ pub mod approvals;
 pub mod artifact;
 pub mod compose;
 pub mod containerd;
+pub mod domain;
 pub mod kube;
 pub mod lifecycle;
+pub mod machine;
 pub mod metrics;
 pub mod model;
 pub mod network;
@@ -197,6 +199,10 @@ pub async fn dispatch(command: Commands) -> Result<()> {
         Commands::Serve(serve_args) => serve::handle_serve(*serve_args).await?,
 
         Commands::Vllm { command } => serve::handle_vllm(command).await?,
+
+        Commands::Domain { command } => domain::handle_domain(command).await?,
+
+        Commands::Machine { command } => machine::handle_machine(command).await?,
     }
 
     Ok(())

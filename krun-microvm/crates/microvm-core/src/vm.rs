@@ -70,6 +70,9 @@ pub struct MicroVmBuilder {
     fs_overlays: Vec<crate::types::FsOverlayEntry>,
     smbios_oem_strings: Vec<String>,
     balloon_reporting_mode: Option<crate::types::FreePageReportingMode>,
+    rosetta: bool,
+    platform: Option<String>,
+    instance_id: Option<String>,
 }
 
 impl MicroVmBuilder {
@@ -125,6 +128,9 @@ impl MicroVmBuilder {
             fs_overlays: Vec::new(),
             smbios_oem_strings: Vec::new(),
             balloon_reporting_mode: None,
+            rosetta: false,
+            platform: None,
+            instance_id: None,
         }
     }
 
@@ -750,6 +756,39 @@ impl MicroVmBuilder {
         self
     }
 
+    /// Enables or disables Apple Silicon Rosetta for Linux (x86_64 emulation).
+    pub fn rosetta(mut self, enabled: bool) -> Self {
+        self.rosetta = enabled;
+        self
+    }
+
+    /// Returns whether Rosetta emulation is requested.
+    pub fn get_rosetta(&self) -> bool {
+        self.rosetta
+    }
+
+    /// Sets the target architecture platform (e.g. "linux/amd64", "linux/arm64").
+    pub fn platform(mut self, platform: impl Into<String>) -> Self {
+        self.platform = Some(platform.into());
+        self
+    }
+
+    /// Returns the configured platform if any.
+    pub fn get_platform(&self) -> Option<&str> {
+        self.platform.as_deref()
+    }
+
+    /// Explicitly assigns a fixed instance ID instead of auto-generating one.
+    pub fn instance_id(mut self, id: impl Into<String>) -> Self {
+        self.instance_id = Some(id.into());
+        self
+    }
+
+    /// Returns the configured instance ID if explicitly set.
+    pub fn get_instance_id(&self) -> Option<&str> {
+        self.instance_id.as_deref()
+    }
+
     /// Resolves the effective base data directory for the microVM.
     fn resolve_data_dir(&self) -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
@@ -772,11 +811,15 @@ impl MicroVmBuilder {
 
     /// Generates a globally unique instance ID and ensures instance directories exist.
     fn generate_instance(&self, data_dir: &Path) -> Result<(String, PathBuf, PathBuf)> {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
-        let millis = now.as_millis();
-        let nanos = now.subsec_nanos();
-        let counter = INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let instance_id = format!("vm-{millis}-{nanos:06}-{counter:03}");
+        let instance_id = if let Some(ref custom_id) = self.instance_id {
+            custom_id.clone()
+        } else {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+            let millis = now.as_millis();
+            let nanos = now.subsec_nanos();
+            let counter = INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            format!("vm-{millis}-{nanos:06}-{counter:03}")
+        };
         let instance_dir = data_dir.join("instances").join(&instance_id);
         let instance_rootfs = instance_dir.join("rootfs");
         Ok((instance_id, instance_dir, instance_rootfs))
@@ -828,9 +871,13 @@ impl MicroVmBuilder {
             }
         };
 
-        tracing::info!("Cloning rootfs to instance {} (CoW)...", instance_id);
-        clone_rootfs(&cached_rootfs, instance_rootfs)
-            .context("Failed to perform CoW clone of rootfs")?;
+        if !instance_rootfs.exists() {
+            tracing::info!("Cloning rootfs to instance {} (CoW)...", instance_id);
+            clone_rootfs(&cached_rootfs, instance_rootfs)
+                .context("Failed to perform CoW clone of rootfs")?;
+        } else {
+            tracing::info!("Reusing existing rootfs for instance {}...", instance_id);
+        }
 
         // Inject single-file mounts (e.g. ConfigMaps, Secrets, service account tokens)
         for (src, dest) in &self.file_mounts {
@@ -1107,6 +1154,26 @@ impl MicroVmBuilder {
             }
         }
 
+        // Attach Apple Silicon Rosetta for Linux runtime if requested or if targeting amd64
+        let rosetta_requested = self.rosetta
+            || self
+                .platform
+                .as_deref()
+                .map(|p| p.contains("amd64") || p.contains("x86_64"))
+                .unwrap_or(false);
+
+        if rosetta_requested {
+            if let Some(rosetta_dir) = find_rosetta_path() {
+                tracing::info!(
+                    "Attaching Rosetta for Linux runtime from {}...",
+                    rosetta_dir.display()
+                );
+                final_virtiofs_mounts.push(VirtioFsMount::new("rosetta", rosetta_dir, true));
+            } else if self.rosetta {
+                bail!("Rosetta for Linux is not installed on this host. On macOS, install with: softwareupdate --install-rosetta");
+            }
+        }
+
         // Ensure mount directory exists in guest rootfs for all virtiofs tags
         for m in &final_virtiofs_mounts {
             let _ = fs::create_dir_all(instance_rootfs.join(&m.tag));
@@ -1125,6 +1192,21 @@ impl MicroVmBuilder {
                         m.tag, m.tag
                     ));
                 }
+
+                // If rosetta is mounted, register ELF handler with binfmt_misc
+                if final_virtiofs_mounts.iter().any(|m| m.tag == "rosetta") {
+                    mount_cmds.push("if [ -f /rosetta/rosetta ]; then".to_string());
+                    mount_cmds.push(
+                        "  mkdir -p /proc/sys/fs/binfmt_misc 2>/dev/null || true".to_string(),
+                    );
+                    mount_cmds.push("  mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true".to_string());
+                    mount_cmds
+                        .push("  if [ -f /proc/sys/fs/binfmt_misc/register ]; then".to_string());
+                    mount_cmds.push("    echo ':rosetta:M::\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x3e\\x00:\\xff\\xff\\xff\\xff\\xff\\xfe\\xfe\\x00\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xfe\\xff\\xff\\xff:/rosetta/rosetta:CF' > /proc/sys/fs/binfmt_misc/register 2>/dev/null || true".to_string());
+                    mount_cmds.push("  fi".to_string());
+                    mount_cmds.push("fi".to_string());
+                }
+
                 if !mount_cmds.is_empty() {
                     let mount_block = mount_cmds.join("\n");
                     let updated = if content.contains("exec \"$@\"") {
@@ -2036,6 +2118,21 @@ pub fn detect_kernel_format(path: &Path) -> u32 {
     }
 }
 
+/// Locates the Rosetta for Linux runtime directory on the host (macOS Apple Silicon or via ROSETTA_PATH).
+pub fn find_rosetta_path() -> Option<PathBuf> {
+    if let Ok(env_path) = std::env::var("ROSETTA_PATH") {
+        let p = PathBuf::from(env_path);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let candidate = PathBuf::from("/Library/Apple/usr/libexec/oah/RosettaLinux");
+    if candidate.exists() && candidate.join("rosetta").exists() {
+        return Some(candidate);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2429,5 +2526,47 @@ mod tests {
         assert!(content.contains("MODEL_NAME=llama-model"));
         assert!(content.contains("MODEL_PATH=/custom/llm"));
         assert!(content.contains("MODEL_FORMAT=gguf"));
+    }
+
+    #[tokio::test]
+    async fn test_builder_rosetta_and_platform() {
+        let temp = tempdir().unwrap();
+        let rosetta_dir = temp.path().join("mock_rosetta");
+        std::fs::create_dir_all(&rosetta_dir).unwrap();
+        std::fs::write(rosetta_dir.join("rosetta"), b"mock-rosetta-bin").unwrap();
+
+        std::env::set_var("ROSETTA_PATH", &rosetta_dir);
+
+        let builder = MicroVmBuilder::new("ubuntu:latest")
+            .rosetta(true)
+            .platform("linux/amd64");
+
+        assert!(builder.get_rosetta());
+        assert_eq!(builder.get_platform(), Some("linux/amd64"));
+
+        let instance_dir = temp.path().join("instance");
+        let instance_rootfs = temp.path().join("rootfs");
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&instance_dir).unwrap();
+        std::fs::create_dir_all(&instance_rootfs).unwrap();
+
+        let initial_cfg = crate::config::KrunConfig::new(vec!["/bin/sh".to_string()], vec![], None);
+        initial_cfg.write_to(&instance_rootfs).unwrap();
+
+        let init_script = instance_rootfs.join("krun-init.sh");
+        std::fs::write(&init_script, "#!/bin/sh\nexec \"$@\"\n").unwrap();
+
+        let virtio_mounts = builder
+            .prepare_virtiofs_mounts(&instance_dir, &instance_rootfs, &data_dir)
+            .await
+            .unwrap();
+
+        assert!(virtio_mounts.iter().any(|m| m.tag == "rosetta"));
+
+        let script_content = std::fs::read_to_string(&init_script).unwrap();
+        assert!(script_content.contains("binfmt_misc"));
+        assert!(script_content.contains(":rosetta:M:"));
+
+        std::env::remove_var("ROSETTA_PATH");
     }
 }

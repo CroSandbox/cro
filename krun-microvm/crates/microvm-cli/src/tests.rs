@@ -31,6 +31,166 @@ fn test_cli_parse_run_artifact_and_cow() {
 }
 
 #[test]
+fn test_cli_parse_run_rosetta_and_platform() {
+    let args = vec![
+        "cro",
+        "run",
+        "--rosetta",
+        "--platform",
+        "linux/amd64",
+        "alpine:latest",
+    ];
+    let cli = Cli::try_parse_from(args).unwrap();
+    match cli.command {
+        Commands::Run(run) => {
+            assert!(run.rosetta);
+            assert_eq!(run.platform.as_deref(), Some("linux/amd64"));
+            assert_eq!(run.image, "alpine:latest");
+        }
+        _ => panic!("Expected Commands::Run"),
+    }
+}
+
+#[test]
+fn test_cli_parse_domain_subcommands() {
+    // 1. Start
+    let start_args = vec!["cro", "domain", "start", "--port", "8080", "-d"];
+    let cli = Cli::try_parse_from(start_args).unwrap();
+    match cli.command {
+        Commands::Domain {
+            command: DomainCommands::Start { port, detach, .. },
+        } => {
+            assert_eq!(port, 8080);
+            assert!(detach);
+        }
+        _ => panic!("Expected Commands::Domain::Start"),
+    }
+
+    // 2. List
+    let list_args = vec!["cro", "domain", "list", "--json"];
+    let cli = Cli::try_parse_from(list_args).unwrap();
+    match cli.command {
+        Commands::Domain {
+            command: DomainCommands::List { json, .. },
+        } => {
+            assert!(json);
+        }
+        _ => panic!("Expected Commands::Domain::List"),
+    }
+
+    // 3. Stop
+    let stop_args = vec!["cro", "domain", "stop"];
+    let cli = Cli::try_parse_from(stop_args).unwrap();
+    match cli.command {
+        Commands::Domain {
+            command: DomainCommands::Stop { .. },
+        } => {}
+        _ => panic!("Expected Commands::Domain::Stop"),
+    }
+}
+
+#[test]
+fn test_cli_parse_machine_subcommands() {
+    // 1. Create
+    let create_args = vec![
+        "cro",
+        "machine",
+        "create",
+        "dev",
+        "--distro",
+        "ubuntu",
+        "-c",
+        "4",
+        "-m",
+        "4096",
+        "--rosetta",
+    ];
+    let cli = Cli::try_parse_from(create_args).unwrap();
+    match cli.command {
+        Commands::Machine {
+            command:
+                MachineCommands::Create {
+                    name,
+                    distro,
+                    cpus,
+                    memory,
+                    rosetta,
+                    ..
+                },
+        } => {
+            assert_eq!(name, "dev");
+            assert_eq!(distro, "ubuntu");
+            assert_eq!(cpus, Some(4));
+            assert_eq!(memory, Some(4096));
+            assert!(rosetta);
+        }
+        _ => panic!("Expected Commands::Machine::Create"),
+    }
+
+    // 2. Shell with trailing command
+    let shell_args = vec!["cro", "machine", "shell", "dev", "--", "uname", "-m"];
+    let cli = Cli::try_parse_from(shell_args).unwrap();
+    match cli.command {
+        Commands::Machine {
+            command: MachineCommands::Shell { name, cmd, .. },
+        } => {
+            assert_eq!(name, "dev");
+            assert_eq!(cmd, vec!["uname", "-m"]);
+        }
+        _ => panic!("Expected Commands::Machine::Shell"),
+    }
+
+    // 3. List
+    let list_args = vec!["cro", "machine", "list", "--json"];
+    let cli = Cli::try_parse_from(list_args).unwrap();
+    match cli.command {
+        Commands::Machine {
+            command: MachineCommands::List { json, .. },
+        } => {
+            assert!(json);
+        }
+        _ => panic!("Expected Commands::Machine::List"),
+    }
+
+    // 4. Start
+    let start_args = vec!["cro", "machine", "start", "dev"];
+    let cli = Cli::try_parse_from(start_args).unwrap();
+    match cli.command {
+        Commands::Machine {
+            command: MachineCommands::Start { name, .. },
+        } => {
+            assert_eq!(name, "dev");
+        }
+        _ => panic!("Expected Commands::Machine::Start"),
+    }
+
+    // 5. Stop
+    let stop_args = vec!["cro", "machine", "stop", "dev"];
+    let cli = Cli::try_parse_from(stop_args).unwrap();
+    match cli.command {
+        Commands::Machine {
+            command: MachineCommands::Stop { name, .. },
+        } => {
+            assert_eq!(name, "dev");
+        }
+        _ => panic!("Expected Commands::Machine::Stop"),
+    }
+
+    // 6. Rm
+    let rm_args = vec!["cro", "machine", "rm", "dev", "-f"];
+    let cli = Cli::try_parse_from(rm_args).unwrap();
+    match cli.command {
+        Commands::Machine {
+            command: MachineCommands::Rm { name, force, .. },
+        } => {
+            assert_eq!(name, "dev");
+            assert!(force);
+        }
+        _ => panic!("Expected Commands::Machine::Rm"),
+    }
+}
+
+#[test]
 fn test_cli_parse_model_subcommands() {
     // 1. Model Pull
     let pull_args = vec!["cro", "model", "pull", "ghcr.io/org/llama-3.2-1b:latest"];

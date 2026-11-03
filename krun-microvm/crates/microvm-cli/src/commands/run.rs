@@ -62,6 +62,8 @@ pub async fn handle_run(run: RunArgs) -> Result<()> {
         disk_read_pool_size,
         balloon_reporting,
         shm_size,
+        rosetta,
+        platform,
         cmd,
         file,
     } = run;
@@ -192,6 +194,14 @@ pub async fn handle_run(run: RunArgs) -> Result<()> {
 
     if let Some(shm) = shm_size {
         builder = builder.shm_size(shm);
+    }
+
+    if rosetta {
+        builder = builder.rosetta(true);
+    }
+
+    if let Some(plat) = platform {
+        builder = builder.platform(plat);
     }
 
     if let Some(lvl) = log_level {
