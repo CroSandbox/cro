@@ -27,9 +27,23 @@ pub fn resolve_distro_image(distro_or_image: &str) -> String {
     distro_or_image.to_string()
 }
 
+/// Sanitizes a username string to strictly alphanumeric characters, underscores, and hyphens.
+pub fn sanitize_username(raw: &str) -> String {
+    let clean: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    if clean.is_empty() || clean.starts_with('-') {
+        "cro".to_string()
+    } else {
+        clean
+    }
+}
+
 /// Retrieves host username, UID, and GID for seamless in-guest parity.
 pub fn get_host_user_info() -> (String, u32, u32) {
-    let user = std::env::var("USER").unwrap_or_else(|_| "cro".to_string());
+    let raw_user = std::env::var("USER").unwrap_or_else(|_| "cro".to_string());
+    let user = sanitize_username(&raw_user);
     #[cfg(unix)]
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     #[cfg(not(unix))]
@@ -41,6 +55,12 @@ pub fn get_host_user_info() -> (String, u32, u32) {
 pub fn validate_machine_name(name: &str) -> Result<()> {
     if name.is_empty() {
         bail!("Machine name cannot be empty");
+    }
+    if name.len() > 64 {
+        bail!(
+            "Machine name '{}' exceeds maximum allowed length of 64 characters",
+            name
+        );
     }
     if name.starts_with('-') || name.ends_with('-') {
         bail!("Machine name '{}' cannot start or end with a hyphen", name);

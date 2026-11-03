@@ -1176,6 +1176,17 @@ impl MicroVmBuilder {
 
         // Ensure mount directory exists in guest rootfs for all virtiofs tags
         for m in &final_virtiofs_mounts {
+            if m.tag.is_empty()
+                || !m
+                    .tag
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                bail!(
+                    "Invalid VirtioFS mount tag '{}'. Tags must be non-empty and alphanumeric",
+                    m.tag
+                );
+            }
             let _ = fs::create_dir_all(instance_rootfs.join(&m.tag));
         }
 

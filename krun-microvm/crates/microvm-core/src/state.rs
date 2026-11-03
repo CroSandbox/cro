@@ -821,7 +821,8 @@ impl StateManager {
                     found_manifest = serde_json::from_str::<SnapshotManifest>(&s).ok();
                 } else if path.starts_with("rootfs") {
                     let rel = path.strip_prefix("rootfs")?;
-                    let dest = target_rootfs.join(rel);
+                    let dest = crate::rootfs::tar_security::sanitize_tar_path(&target_rootfs, rel)?;
+                    crate::rootfs::tar_security::ensure_no_symlink_parents(&target_rootfs, &dest)?;
                     if let Some(parent) = dest.parent() {
                         fs::create_dir_all(parent)?;
                     }

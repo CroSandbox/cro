@@ -269,7 +269,12 @@ pub fn generate_404_html(host: &str, domains: &[DomainMapping], bind_port: u16) 
                       <td>{}</td>\
                       <td><span style=\"color: #28a745; font-weight: 500;\">● {}</span></td>\
                     </tr>",
-                    d.domain, port_suffix, d.domain, d.target_host_port, html_escape(&d.image_or_service), d.status
+                    html_escape(&d.domain),
+                    port_suffix,
+                    html_escape(&d.domain),
+                    d.target_host_port,
+                    html_escape(&d.image_or_service),
+                    html_escape(&d.status)
                 )
             })
             .collect::<Vec<_>>()
@@ -380,26 +385,51 @@ fn html_escape(s: &str) -> String {
 
 /// Processes an individual client connection: parses `Host:` header and proxies to target microVM.
 async fn handle_connection(mut client: TcpStream, data_dir: PathBuf, bind_port: u16) -> Result<()> {
-    let mut head = Vec::with_capacity(2048);
-    let mut buf = [0u8; 4096];
+    // Security: Only accept connections originating from loopback
+    if let Ok(peer) = client.peer_addr() {
+        if !peer.ip().is_loopback() {
+            warn!(
+                "Security: rejected non-loopback connection to domain router from {}",
+                peer
+            );
+            return Ok(());
+        }
+    }
 
-    let header_end = loop {
-        let n = client
-            .read(&mut buf)
-            .await
-            .context("Failed reading from client socket")?;
-        if n == 0 {
-            return Ok(());
-        }
-        head.extend_from_slice(&buf[..n]);
-        if let Some(idx) = head.windows(4).position(|w| w == b"\r\n\r\n") {
-            break idx + 4;
-        }
-        if head.len() > MAX_HEAD_SIZE {
-            let resp = "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-            let _ = client.write_all(resp.as_bytes()).await;
-            return Ok(());
-        }
+    let _ = client.set_nodelay(true);
+
+    let header_read_fut = async {
+        let mut head = Vec::with_capacity(2048);
+        let mut buf = [0u8; 4096];
+
+        let header_end = loop {
+            let n = client
+                .read(&mut buf)
+                .await
+                .context("Failed reading from client socket")?;
+            if n == 0 {
+                return Ok::<_, anyhow::Error>(None);
+            }
+            head.extend_from_slice(&buf[..n]);
+            if let Some(idx) = head.windows(4).position(|w| w == b"\r\n\r\n") {
+                break idx + 4;
+            }
+            if head.len() > MAX_HEAD_SIZE {
+                let resp = "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                let _ = client.write_all(resp.as_bytes()).await;
+                return Ok::<_, anyhow::Error>(None);
+            }
+        };
+
+        Ok::<_, anyhow::Error>(Some((head, header_end)))
+    };
+
+    // Protect against Slowloris DoS attacks by capping header read time to 30 seconds
+    let read_result =
+        tokio::time::timeout(std::time::Duration::from_secs(30), header_read_fut).await;
+    let (head, header_end) = match read_result {
+        Ok(Ok(Some((h, end)))) => (h, end),
+        _ => return Ok(()),
     };
 
     let text = String::from_utf8_lossy(&head[..header_end]);
@@ -479,14 +509,23 @@ pub async fn run_domain_router(
     info!("cro domain ingress router listening on {}", listen_target);
 
     let data_dir = Arc::new(config.data_dir);
+    let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(512));
 
     loop {
         tokio::select! {
             accept_res = listener.accept() => {
                 match accept_res {
                     Ok((socket, _peer)) => {
+                        let permit = match conn_semaphore.clone().try_acquire_owned() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                warn!("Domain router connection limit reached (512 concurrent connections)");
+                                continue;
+                            }
+                        };
                         let data_dir = Arc::clone(&data_dir);
                         tokio::spawn(async move {
+                            let _permit = permit;
                             if let Err(e) = handle_connection(socket, (*data_dir).clone(), port).await {
                                 debug!("Connection handler terminated: {}", e);
                             }
