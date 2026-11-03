@@ -127,7 +127,17 @@ pub async fn dispatch(command: Commands) -> Result<()> {
             data_dir,
         } => system::handle_stats(id, no_stream, json, data_dir).await?,
 
-        Commands::Top { id, data_dir } => lifecycle::handle_top(id, data_dir)?,
+        Commands::Top {
+            id,
+            interactive,
+            data_dir,
+        } => {
+            if interactive || id.is_none() {
+                crate::ui::run_cockpit(data_dir).await?;
+            } else if let Some(target_id) = id {
+                lifecycle::handle_top(target_id, data_dir)?;
+            }
+        }
 
         Commands::Cp {
             src,
@@ -203,6 +213,10 @@ pub async fn dispatch(command: Commands) -> Result<()> {
         Commands::Domain { command } => domain::handle_domain(command).await?,
 
         Commands::Machine { command } => machine::handle_machine(command).await?,
+
+        Commands::Ui { data_dir } => {
+            crate::ui::run_cockpit(data_dir).await?;
+        }
     }
 
     Ok(())

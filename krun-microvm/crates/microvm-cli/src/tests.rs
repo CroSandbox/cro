@@ -580,10 +580,39 @@ fn test_cli_parse_rm_and_top() {
     let top_args = vec!["microvm", "top", "test-vm-123"];
     let cli = Cli::try_parse_from(top_args).unwrap();
     match cli.command {
-        Commands::Top { id, .. } => {
-            assert_eq!(id, "test-vm-123");
+        Commands::Top {
+            id, interactive, ..
+        } => {
+            assert_eq!(id, Some("test-vm-123".to_string()));
+            assert!(!interactive);
         }
         _ => panic!("Expected Commands::Top"),
+    }
+
+    let top_interactive_args = vec!["microvm", "top", "-i"];
+    let cli = Cli::try_parse_from(top_interactive_args).unwrap();
+    match cli.command {
+        Commands::Top {
+            id, interactive, ..
+        } => {
+            assert_eq!(id, None);
+            assert!(interactive);
+        }
+        _ => panic!("Expected Commands::Top"),
+    }
+
+    let ui_args = vec!["microvm", "ui"];
+    let cli = Cli::try_parse_from(ui_args).unwrap();
+    match cli.command {
+        Commands::Ui { .. } => {}
+        _ => panic!("Expected Commands::Ui"),
+    }
+
+    let cockpit_args = vec!["microvm", "cockpit"];
+    let cli = Cli::try_parse_from(cockpit_args).unwrap();
+    match cli.command {
+        Commands::Ui { .. } => {}
+        _ => panic!("Expected Commands::Ui alias cockpit"),
     }
 }
 

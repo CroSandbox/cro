@@ -10,6 +10,7 @@ mod args;
 mod commands;
 #[cfg(test)]
 mod tests;
+pub mod ui;
 mod utils;
 
 use args::Cli;

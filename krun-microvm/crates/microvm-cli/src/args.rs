@@ -460,7 +460,11 @@ pub enum Commands {
     /// Display running supervisor and thread statistics of a microVM
     Top {
         /// ID or PID of the microVM
-        id: String,
+        id: Option<String>,
+
+        /// Run in interactive full-screen cockpit mode
+        #[arg(short = 'i', long)]
+        interactive: bool,
 
         /// Custom data cache directory
         #[arg(long)]
@@ -693,6 +697,14 @@ pub enum Commands {
     Machine {
         #[command(subcommand)]
         command: MachineCommands,
+    },
+
+    /// Open the interactive multi-tab terminal cockpit
+    #[command(alias = "cockpit", alias = "dashboard")]
+    Ui {
+        /// Custom data cache directory
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
     },
 }
 
