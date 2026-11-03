@@ -45,6 +45,10 @@ pub struct DomainRouterConfig {
     pub bind_addr: Option<String>,
     /// Base data directory for state lookup.
     pub data_dir: PathBuf,
+    /// Port for the embedded Micro-DNS server (default: 5354).
+    pub dns_port: u16,
+    /// Whether to launch the embedded Micro-DNS server (default: true).
+    pub enable_dns: bool,
 }
 
 impl Default for DomainRouterConfig {
@@ -54,6 +58,8 @@ impl Default for DomainRouterConfig {
             bind_addr: None,
             data_dir: PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
                 .join(".cache/krun-microvm"),
+            dns_port: super::dns::DEFAULT_DNS_PORT,
+            enable_dns: true,
         }
     }
 }
@@ -508,6 +514,27 @@ pub async fn run_domain_router(
 
     info!("cro domain ingress router listening on {}", listen_target);
 
+    let dns_handle = if config.enable_dns {
+        match super::dns::MicroDnsServer::start("127.0.0.1", config.dns_port).await {
+            Ok(h) => {
+                info!(
+                    "cro micro-DNS server listening on 127.0.0.1:{} (*.cro.local -> 127.0.0.1)",
+                    config.dns_port
+                );
+                Some(h)
+            }
+            Err(e) => {
+                warn!(
+                    "Could not start embedded Micro-DNS server on port {}: {}",
+                    config.dns_port, e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let data_dir = Arc::new(config.data_dir);
     let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(512));
 
@@ -538,6 +565,9 @@ pub async fn run_domain_router(
             }
             _ = shutdown_rx.recv() => {
                 info!("Domain router shutdown signal received.");
+                if let Some(ref h) = dns_handle {
+                    h.shutdown();
+                }
                 break;
             }
         }

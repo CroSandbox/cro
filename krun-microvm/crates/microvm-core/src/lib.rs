@@ -34,9 +34,10 @@ pub use compose::{
     ComposeVolumeSpec, K8sMetadata, K8sMicroVmManifest, K8sMicroVmSpec, Manifest, ServiceSpec,
 };
 pub use domain::{
-    extract_routing_keys, generate_404_html, list_active_domains, rank_port, resolve_domain,
-    run_domain_router, sanitize_domain_label, select_best_forward_host_port, DomainMapping,
-    DomainRouterConfig, NOT_WEB, WEB_PORTS,
+    extract_routing_keys, generate_404_html, list_active_domains, query_micro_dns, rank_port,
+    resolve_domain, run_domain_router, sanitize_domain_label, select_best_forward_host_port,
+    setup_macos_resolver, DomainMapping, DomainRouterConfig, MicroDnsHandle, MicroDnsServer,
+    NOT_WEB, WEB_PORTS,
 };
 pub use error::{ComposeError, MicroVmError, NetError, SecurityError, StateError, VmError};
 pub use machine::{

@@ -87,6 +87,31 @@ fn test_cli_parse_domain_subcommands() {
         } => {}
         _ => panic!("Expected Commands::Domain::Stop"),
     }
+
+    // 4. SetupResolver
+    let setup_args = vec!["cro", "domain", "setup-resolver", "--dns-port", "5354"];
+    let cli_setup = Cli::try_parse_from(setup_args).unwrap();
+    match cli_setup.command {
+        Commands::Domain {
+            command: DomainCommands::SetupResolver { dns_port },
+        } => {
+            assert_eq!(dns_port, 5354);
+        }
+        _ => panic!("Expected Commands::Domain::SetupResolver"),
+    }
+
+    // 5. Resolve
+    let resolve_args = vec!["cro", "domain", "resolve", "llama.cro.local"];
+    let cli_res = Cli::try_parse_from(resolve_args).unwrap();
+    match cli_res.command {
+        Commands::Domain {
+            command: DomainCommands::Resolve { domain, dns_port },
+        } => {
+            assert_eq!(domain, "llama.cro.local");
+            assert_eq!(dns_port, 5354);
+        }
+        _ => panic!("Expected Commands::Domain::Resolve"),
+    }
 }
 
 #[test]

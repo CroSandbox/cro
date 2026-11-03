@@ -1308,6 +1308,31 @@ pub enum DomainCommands {
         /// Custom data cache directory
         #[arg(long)]
         data_dir: Option<PathBuf>,
+
+        /// Embedded Micro-DNS server port for *.cro.local resolution (default: 5354)
+        #[arg(long, default_value_t = 5354)]
+        dns_port: u16,
+
+        /// Disable the embedded Micro-DNS server
+        #[arg(long)]
+        no_dns: bool,
+    },
+
+    /// Configure macOS /etc/resolver/cro.local for automatic zero-config resolution
+    SetupResolver {
+        /// Micro-DNS server port (default: 5354)
+        #[arg(long, default_value_t = 5354)]
+        dns_port: u16,
+    },
+
+    /// Test resolution of a .cro.local domain via the embedded Micro-DNS server
+    Resolve {
+        /// Domain to resolve (e.g. llama.cro.local)
+        domain: String,
+
+        /// Micro-DNS server port (default: 5354)
+        #[arg(long, default_value_t = 5354)]
+        dns_port: u16,
     },
 
     /// List active domain mappings and target microVMs

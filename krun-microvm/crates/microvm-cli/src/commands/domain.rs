@@ -13,13 +13,17 @@ use std::process::{Command, Stdio};
 
 use crate::args::DomainCommands;
 use crate::utils::default_data_dir;
-use microvm_core::{list_active_domains, run_domain_router, DomainRouterConfig};
+use microvm_core::{
+    list_active_domains, query_micro_dns, run_domain_router, setup_macos_resolver,
+    DomainRouterConfig,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct DomainRouterState {
     pid: u32,
     port: u16,
     bind_addr: String,
+    dns_port: u16,
     started_at: u64,
 }
 
@@ -45,9 +49,33 @@ pub async fn handle_domain(command: DomainCommands) -> Result<()> {
             addr,
             detach,
             data_dir,
-        } => handle_start(port, addr, detach, data_dir).await,
+            dns_port,
+            no_dns,
+        } => handle_start(port, addr, detach, data_dir, dns_port, no_dns).await,
+        DomainCommands::SetupResolver { dns_port } => handle_setup_resolver(dns_port),
+        DomainCommands::Resolve { domain, dns_port } => handle_resolve(&domain, dns_port).await,
         DomainCommands::List { json, data_dir } => handle_list(json, data_dir),
         DomainCommands::Stop { data_dir } => handle_stop(data_dir),
+    }
+}
+
+fn handle_setup_resolver(dns_port: u16) -> Result<()> {
+    let msg = setup_macos_resolver(dns_port)?;
+    println!("{}", msg);
+    Ok(())
+}
+
+async fn handle_resolve(domain: &str, dns_port: u16) -> Result<()> {
+    println!("🔍 Querying embedded Micro-DNS server at 127.0.0.1:{} for '{}'...", dns_port, domain);
+    match query_micro_dns("127.0.0.1", dns_port, domain).await {
+        Ok(ip) => {
+            println!("✅ Resolved '{}' -> {}", domain, ip);
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to resolve '{}': {}", domain, e);
+            Err(e)
+        }
     }
 }
 
@@ -56,6 +84,8 @@ async fn handle_start(
     addr: Option<String>,
     detach: bool,
     data_dir: Option<PathBuf>,
+    dns_port: u16,
+    no_dns: bool,
 ) -> Result<()> {
     let base = data_dir.unwrap_or_else(default_data_dir);
     fs::create_dir_all(&base)?;
@@ -92,8 +122,14 @@ async fn handle_start(
             .arg(port.to_string())
             .arg("--addr")
             .arg(&bind_addr)
+            .arg("--dns-port")
+            .arg(dns_port.to_string())
             .arg("--data-dir")
             .arg(&base);
+
+        if no_dns {
+            cmd.arg("--no-dns");
+        }
 
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -110,6 +146,7 @@ async fn handle_start(
             pid,
             port,
             bind_addr: bind_addr.clone(),
+            dns_port,
             started_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -124,6 +161,9 @@ async fn handle_start(
             "🚀 Local domain ingress router started in background (PID: {}, Port: {})",
             pid, port
         );
+        if !no_dns {
+            println!("🌐 Micro-DNS Server: 127.0.0.1:{} (*.cro.local -> 127.0.0.1)", dns_port);
+        }
         println!("🌐 Resolving: *.cro.local -> running microVMs");
         println!("👉 Inspect mappings with: cro domain list");
         return Ok(());
@@ -137,6 +177,7 @@ async fn handle_start(
         pid: current_pid,
         port,
         bind_addr: bind_addr.clone(),
+        dns_port,
         started_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -151,6 +192,12 @@ async fn handle_start(
         "🌐 Starting local domain ingress router on {}:{}...",
         bind_addr, port
     );
+    if !no_dns {
+        println!(
+            "🌐 Micro-DNS Server active on 127.0.0.1:{} (*.cro.local -> 127.0.0.1)",
+            dns_port
+        );
+    }
     println!(
         "👉 Point your browser or curl to: http://<service>.cro.local:{}/",
         port
@@ -169,6 +216,8 @@ async fn handle_start(
         bind_port: port,
         bind_addr: Some(bind_addr),
         data_dir: base.clone(),
+        dns_port,
+        enable_dns: !no_dns,
     };
 
     let run_res = run_domain_router(config, shutdown_rx).await;
