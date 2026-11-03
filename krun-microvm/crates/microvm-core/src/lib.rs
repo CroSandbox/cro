@@ -67,7 +67,7 @@ pub use serve::{
     find_available_loopback_port, GatewayStatsSnapshot, ServeConfig, ServeEngine, ServeGateway,
     ServeGatewayHandle, ServeHandle, ServeManager,
 };
-pub use state::{SnapshotManifest, StateManager, VmState, VmStatus};
+pub use state::{RedbStore, SnapshotManifest, StateManager, VmState, VmStatus};
 pub use tty::RawModeGuard;
 pub use types::{
     ArtifactMount, BootPayload, CowWorkspace, DiskAttachment, FirmwarePayload, KernelPayload,

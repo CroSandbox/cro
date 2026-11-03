@@ -47,6 +47,7 @@ futures = "0.3"
 serde_yaml = "0.9"
 pingora = { version = "0.9", default-features = false, features = ["proxy", "lb", "rustls"] }
 http = "1.0"
+redb = "4.4"
 
 [profile.release]
 opt-level = 3

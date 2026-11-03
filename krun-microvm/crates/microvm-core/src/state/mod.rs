@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod snapshot;
+pub mod store;
 pub mod types;
 
 #[cfg(test)]
 mod tests;
 
 use snapshot::*;
+pub use store::*;
 pub use types::*;
 
 use anyhow::{bail, Result};
@@ -180,23 +182,55 @@ impl StateManager {
         data_dir.join("state")
     }
 
+    /// Accesses or opens the redb ACID state database with transparent legacy JSON migration.
+    pub fn store(data_dir: &Path) -> Result<RedbStore> {
+        let db_path = data_dir.join("state.redb");
+        let store = RedbStore::open_or_create(&db_path)?;
+        let json_dir = Self::state_dir(data_dir);
+        if json_dir.exists() {
+            let _ = store.migrate_from_json_dir(&json_dir);
+        }
+        Ok(store)
+    }
+
     pub fn save(data_dir: &Path, state: &VmState) -> Result<PathBuf> {
         let dir = Self::state_dir(data_dir);
         let file_path = dir.join(format!("{}.json", state.id));
         let data = serde_json::to_string_pretty(state)?;
         atomic_write(&file_path, data.as_bytes())?;
+
+        // Also persist in redb ACID storage
+        if let Ok(store) = Self::store(data_dir) {
+            let _ = store.save_instance(state);
+        }
+
         Ok(file_path)
     }
 
     pub fn remove(data_dir: &Path, id: &str) -> Result<()> {
         let file_path = Self::state_dir(data_dir).join(format!("{}.json", id));
         if file_path.exists() {
-            fs::remove_file(file_path)?;
+            let _ = fs::remove_file(file_path);
         }
+
+        // Also remove from redb ACID storage
+        if let Ok(store) = Self::store(data_dir) {
+            let _ = store.delete_instance(id);
+        }
+
         Ok(())
     }
 
     pub fn list(data_dir: &Path) -> Result<Vec<VmState>> {
+        // Query redb ACID storage first
+        if let Ok(store) = Self::store(data_dir) {
+            if let Ok(instances) = store.list_instances() {
+                if !instances.is_empty() {
+                    return Ok(instances);
+                }
+            }
+        }
+
         let dir = Self::state_dir(data_dir);
         if !dir.exists() {
             return Ok(Vec::new());
@@ -249,6 +283,22 @@ impl StateManager {
     }
 
     pub fn find(data_dir: &Path, id_or_pid: &str) -> Result<Option<VmState>> {
+        // Direct O(1) B-tree lookup by exact ID from redb
+        if let Ok(store) = Self::store(data_dir) {
+            if let Ok(Some(mut vm)) = store.get_instance(id_or_pid) {
+                vm.status = if vm.is_process_alive() {
+                    if vm.status == VmStatus::Paused {
+                        VmStatus::Paused
+                    } else {
+                        VmStatus::Running
+                    }
+                } else {
+                    VmStatus::Stopped
+                };
+                return Ok(Some(vm));
+            }
+        }
+
         let vms = Self::list(data_dir)?;
         let target = vms.into_iter().find(|vm| {
             vm.id == id_or_pid || vm.id.starts_with(id_or_pid) || vm.pid.to_string() == id_or_pid
