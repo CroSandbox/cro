@@ -21,6 +21,25 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  installer:
+    name: Installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check installer syntax
+        run: |
+          bash -n install.sh
+          bash -n krun-microvm/install.sh
+
+      - name: Run isolated installer tests
+        run: python3 -m unittest discover -s tests -v
+
   # =========================================================================
   #  Formatting — fast gate, no deps needed beyond rustfmt
   # =========================================================================

@@ -36,7 +36,7 @@ submodules:
 
 prereqs: submodules
 	@echo "Checking system prerequisites..."
-	@./install.sh --no-build --no-sign --skip-submodules -y
+	@./install.sh --prereqs-only --skip-submodules -y
 
 deps: prereqs
 
