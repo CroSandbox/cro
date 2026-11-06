@@ -4,9 +4,9 @@
 //! CNCF ModelPack Engine for pulling, caching, inspecting, and listing models.
 
 use super::spec::*;
+use crate::oci::digest::{sha256_hex, verify_sha256};
 use crate::oci::{ImageReference, OciClient};
 use crate::rootfs::extract::extract_layer;
-use crate::rootfs::tar_security::sanitize_tar_path;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -159,12 +159,11 @@ impl ModelEngine {
                         format!("blob_{short}.bin")
                     });
 
-                let target_file = sanitize_tar_path(&staging_dir, Path::new(&filename))
-                    .unwrap_or_else(|_| staging_dir.join(&filename));
-                if let Some(parent) = target_file.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::write(&target_file, &blob_bytes)?;
+                crate::rootfs::tar_security::write_file_in_root(
+                    &staging_dir,
+                    Path::new(&filename),
+                    &blob_bytes,
+                )?;
             }
         }
 
@@ -200,9 +199,10 @@ impl ModelEngine {
             path: model_dir.clone(),
         };
 
-        fs::write(
-            staging_dir.join(".modelpack.json"),
-            serde_json::to_vec_pretty(&metadata)?,
+        crate::rootfs::tar_security::write_file_in_root(
+            &staging_dir,
+            Path::new(".modelpack.json"),
+            serde_json::to_string_pretty(&metadata)?.as_bytes(),
         )?;
 
         // 6. Commit staging directory to model_dir
@@ -361,24 +361,20 @@ impl ModelEngine {
             .and_then(|d| d.as_str())
             .context("Missing manifest digest in index.json")?;
 
-        let manifest_hex = manifest_digest
-            .strip_prefix("sha256:")
-            .unwrap_or(manifest_digest);
+        let manifest_hex = sha256_hex(manifest_digest)?;
         let manifest_blob = layout_dir.join("blobs").join("sha256").join(manifest_hex);
         let manifest_bytes = fs::read(&manifest_blob)
             .with_context(|| format!("Manifest blob not found: {}", manifest_blob.display()))?;
 
+        verify_sha256(manifest_digest, &manifest_bytes)?;
         let manifest = ModelManifest::from_json_slice(&manifest_bytes)?;
 
-        let config_hex = manifest
-            .config
-            .digest
-            .strip_prefix("sha256:")
-            .unwrap_or(&manifest.config.digest);
+        let config_hex = sha256_hex(&manifest.config.digest)?;
         let config_blob = layout_dir.join("blobs").join("sha256").join(config_hex);
         let config_bytes = fs::read(&config_blob)
             .with_context(|| format!("Config blob not found: {}", config_blob.display()))?;
 
+        verify_sha256(&manifest.config.digest, &config_bytes)?;
         let config = ModelConfig::from_json_slice(&config_bytes)?;
         let total_size = manifest.layers.iter().map(|l| l.size).sum();
 

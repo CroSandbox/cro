@@ -29,9 +29,11 @@ R = TypeVar("R")
 
 RES_MARKER_START = "__KRUN_SDK_RES__"
 RES_MARKER_END = "__KRUN_SDK_RES__"
+MAX_RESULT_BYTES = 8 * 1024 * 1024
+MAX_RESULT_ENCODED_BYTES = 4 * ((MAX_RESULT_BYTES + 2) // 3)
 
 GUEST_HARNESS_TEMPLATE = """
-import sys, base64, pickle, traceback
+import sys, base64, pickle, json, traceback
 
 def main():
     payload_b64 = "{payload_b64}"
@@ -43,16 +45,16 @@ def main():
 
     try:
         res = func(*args, **kwargs)
-        payload_out = pickle.dumps({{"status": "ok", "result": res}})
+        payload_out = json.dumps({{"status": "ok", "result": res}}, allow_nan=False).encode("utf-8")
         encoded = base64.b64encode(payload_out).decode("utf-8")
         print("{start}" + encoded + "{end}")
     except Exception as exc:
-        payload_out = pickle.dumps({{
+        payload_out = json.dumps({{
             "status": "error",
             "error": str(exc),
             "error_type": type(exc).__name__,
             "traceback": traceback.format_exc(),
-        }})
+        }}, allow_nan=False).encode("utf-8")
         encoded = base64.b64encode(payload_out).decode("utf-8")
         print("{start}" + encoded + "{end}")
         sys.exit(1)
@@ -173,17 +175,39 @@ class MicroVmTask(Generic[R]):
 
     def _parse_output(self, stdout: str, stderr: str, returncode: int) -> R:
         if RES_MARKER_START in stdout:
-            parts = stdout.split(RES_MARKER_START)
-            content = parts[1].split(RES_MARKER_END)[0].strip()
             try:
-                decoded = base64.b64decode(content)
-                result_data = pickle.loads(decoded)
-            except Exception as e:
+                start = stdout.index(RES_MARKER_START) + len(RES_MARKER_START)
+                end = stdout.index(RES_MARKER_END, start)
+                if end - start > MAX_RESULT_ENCODED_BYTES:
+                    raise ValueError("Task result exceeds the 8 MiB limit")
+                content = stdout[start:end].strip()
+                decoded = base64.b64decode(content, validate=True)
+                if len(decoded) > MAX_RESULT_BYTES:
+                    raise ValueError("Task result exceeds the 8 MiB limit")
+
+                def reject_constant(value):
+                    raise ValueError("Non-finite JSON value: " + value)
+
+                # Guest output is untrusted: never unpickle it on the host.
+                result_data = json.loads(decoded, parse_constant=reject_constant)
+                if not isinstance(result_data, dict):
+                    raise ValueError("Task result must be a JSON object")
+                if result_data.get("status") not in ("ok", "error"):
+                    raise ValueError("Unknown task result status")
+                if result_data["status"] == "ok":
+                    if "result" not in result_data:
+                        raise ValueError("Successful task result is missing its result")
+                    if returncode != 0:
+                        raise ValueError("Guest reported success but exited with a nonzero status")
+                elif any(not isinstance(result_data.get(key, ""), str)
+                         for key in ("error", "error_type", "traceback")):
+                    raise ValueError("Task error details must be strings")
+            except (ValueError, TypeError, RecursionError) as e:
                 raise MicroVmExecutionError(
-                    f"Failed to deserialize task result from microVM: {e}\nStdout: {stdout}\nStderr: {stderr}",
+                    f"Invalid task result from microVM: {e}",
                     exit_code=returncode,
                     stderr=stderr,
-                )
+                ) from e
 
             if result_data.get("status") == "ok":
                 return result_data["result"]

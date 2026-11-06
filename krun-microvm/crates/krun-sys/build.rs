@@ -87,7 +87,14 @@ fn main() {
     println!("cargo:rerun-if-env-changed=FORCE_LIBKRUN_STUB");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
 
-    let force_stub = std::env::var("FORCE_LIBKRUN_STUB").is_ok();
+    let force_stub = match std::env::var("FORCE_LIBKRUN_STUB").as_deref() {
+        Ok("1" | "true") => true,
+        Ok("0" | "false" | "") | Err(_) => false,
+        Ok(value) => panic!("Invalid FORCE_LIBKRUN_STUB value: {value:?}; use 1 or 0"),
+    };
+    if force_stub && std::env::var("PROFILE").as_deref() == Ok("release") {
+        panic!("Refusing to build release binaries with the libkrun test stub");
+    }
     let variant = if force_stub {
         LibKrunVariant::None
     } else {
@@ -112,7 +119,10 @@ fn main() {
             cc::Build::new().file("compat.c").compile("krun_compat");
         }
         LibKrunVariant::None => {
-            println!("cargo:warning=libkrun native library not found; compiling fallback stub for test/CI compatibility");
+            if !force_stub {
+                panic!("Native libkrun library not found. Install libkrun or set LIBKRUN_DIR. For debug tests only, explicitly set FORCE_LIBKRUN_STUB=1.");
+            }
+            println!("cargo:warning=Explicit test mode: compiling libkrun stub; no hardware isolation is provided");
             cc::Build::new().file("stub.c").compile("krun");
         }
     }

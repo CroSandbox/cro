@@ -106,45 +106,58 @@ impl StateManager {
                 .as_millis()
         );
         let target_id = new_id.unwrap_or(&gen_id);
+        if target_id.is_empty()
+            || target_id == "."
+            || target_id == ".."
+            || target_id.len() > 128
+            || !target_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        {
+            bail!("Invalid snapshot instance ID");
+        }
         let instances_dir = data_dir.join("instances").join(target_id);
-        fs::create_dir_all(&instances_dir)?;
+        crate::rootfs::tar_security::ensure_no_symlink_parents(data_dir, &instances_dir)?;
+        fs::create_dir_all(data_dir.join("instances"))?;
+        // Never restore over an existing instance or a planted symlink.
+        fs::create_dir(&instances_dir)?;
 
         let target_rootfs = instances_dir.join("rootfs");
 
         let manifest: SnapshotManifest = if snapshot_path.is_file() {
+            // Extract in a private staging directory using the same hardened
+            // archive handling as OCI layers, never entry.unpack on host paths.
+            let staging = tempfile::tempdir_in(&instances_dir)?;
             let file = fs::File::open(snapshot_path)?;
-            let mut archive = tar::Archive::new(file);
-            let mut found_manifest = None;
-
-            for entry_res in archive.entries()? {
-                let mut entry = entry_res?;
-                let path = entry.path()?.to_path_buf();
-                if path == Path::new("snapshot.json") {
-                    let mut s = String::new();
-                    std::io::Read::read_to_string(&mut entry, &mut s)?;
-                    found_manifest = serde_json::from_str::<SnapshotManifest>(&s).ok();
-                } else if path.starts_with("rootfs") {
-                    let rel = path.strip_prefix("rootfs")?;
-                    let dest = crate::rootfs::tar_security::sanitize_tar_path(&target_rootfs, rel)?;
-                    crate::rootfs::tar_security::ensure_no_symlink_parents(&target_rootfs, &dest)?;
-                    if let Some(parent) = dest.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    entry.unpack(&dest)?;
-                }
+            crate::rootfs::extract::extract_layer(file, staging.path(), false)?;
+            let manifest_path = staging.path().join("snapshot.json");
+            if !fs::symlink_metadata(&manifest_path)?.is_file() {
+                bail!("Snapshot manifest must be a regular file");
             }
-
-            found_manifest.ok_or_else(|| anyhow::anyhow!("snapshot.json not found in archive"))?
+            let data = fs::read_to_string(manifest_path)?;
+            let manifest = serde_json::from_str::<SnapshotManifest>(&data)?;
+            let source_rootfs = staging.path().join("rootfs");
+            if !fs::symlink_metadata(&source_rootfs)?.is_dir() {
+                bail!("Snapshot rootfs must be a directory");
+            }
+            crate::rootfs::clone_rootfs(&source_rootfs, &target_rootfs)?;
+            manifest
         } else {
             let manifest_path = snapshot_path.join("snapshot.json");
             if !manifest_path.exists() {
                 bail!("snapshot.json not found in {}", snapshot_path.display());
+            }
+            if !fs::symlink_metadata(&manifest_path)?.is_file() {
+                bail!("Snapshot manifest must be a regular file");
             }
             let data = fs::read_to_string(manifest_path)?;
             let m: SnapshotManifest = serde_json::from_str(&data)?;
 
             let src_rootfs = snapshot_path.join("rootfs");
             if src_rootfs.exists() {
+                if !fs::symlink_metadata(&src_rootfs)?.is_dir() {
+                    bail!("Snapshot rootfs must be a directory");
+                }
                 crate::rootfs::clone_rootfs(&src_rootfs, &target_rootfs)?;
             }
             m
@@ -173,5 +186,55 @@ impl StateManager {
 
         Self::save(data_dir, &new_state)?;
         Ok(new_state)
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn restore_cannot_escape_instance_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let snapshot = temp.path().join("snapshot");
+        fs::create_dir(&snapshot).unwrap();
+        let data = temp.path().join("data");
+        for id in ["../outside", "/tmp/escape", ".", "..", ""] {
+            assert!(StateManager::restore(&data, &snapshot, Some(id)).is_err());
+        }
+        assert!(!data.exists());
+    }
+
+    #[test]
+    fn restore_cannot_overwrite_existing_instance() {
+        let temp = tempfile::tempdir().unwrap();
+        let snapshot = temp.path().join("snapshot");
+        fs::create_dir(&snapshot).unwrap();
+        let data = temp.path().join("data");
+        let instance = data.join("instances/existing");
+        fs::create_dir_all(&instance).unwrap();
+        fs::write(instance.join("keep"), b"existing").unwrap();
+        assert!(StateManager::restore(&data, &snapshot, Some("existing")).is_err());
+        assert_eq!(fs::read(instance.join("keep")).unwrap(), b"existing");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn snapshot_cannot_use_host_file_as_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let host = temp.path().join("host-manifest");
+        fs::write(&host, b"host secret").unwrap();
+        let snapshot = temp.path().join("snapshot.tar");
+        let mut builder = tar::Builder::new(fs::File::create(&snapshot).unwrap());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        builder
+            .append_link(&mut header, "snapshot.json", &host)
+            .unwrap();
+        builder.finish().unwrap();
+        assert!(StateManager::restore(&temp.path().join("data"), &snapshot, Some("new")).is_err());
+        assert_eq!(fs::read(host).unwrap(), b"host secret");
     }
 }

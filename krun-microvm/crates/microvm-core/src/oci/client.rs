@@ -1,3 +1,4 @@
+use super::digest::{sha256_hex, verify_sha256};
 use super::reference::ImageReference;
 use crate::config::OciConfig;
 use crate::rootfs::extract::extract_layer;
@@ -335,15 +336,14 @@ impl OciClient {
                 layer.digest
             );
 
-            let layer_hash = layer
-                .digest
-                .strip_prefix("sha256:")
-                .unwrap_or(&layer.digest);
+            let layer_hash = sha256_hex(&layer.digest)?;
             let blob_cache_file = cache_base.join("blobs").join("sha256").join(layer_hash);
 
             let blob_bytes = if blob_cache_file.exists() {
                 tracing::debug!("Layer blob cache hit: {}", layer.digest);
-                bytes::Bytes::from(std::fs::read(&blob_cache_file)?)
+                let cached = std::fs::read(&blob_cache_file)?;
+                verify_sha256(&layer.digest, &cached)?;
+                bytes::Bytes::from(cached)
             } else {
                 let downloaded = self
                     .fetch_blob_bytes(reference, &layer.digest, token_ref)
@@ -465,6 +465,9 @@ impl OciClient {
         // Check if this is an image index / multi-arch manifest list
         if let Ok(index) = serde_json::from_slice::<ManifestIndex>(&body_bytes) {
             if let Some(entries) = index.manifests {
+                if entries.is_empty() {
+                    bail!("Registry returned an empty manifest index");
+                }
                 let target_arch = match std::env::consts::ARCH {
                     "aarch64" => "arm64",
                     "x86_64" => "amd64",
@@ -491,13 +494,16 @@ impl OciClient {
                     }
                 };
 
+                sha256_hex(chosen_digest)?;
                 // Fetch the concrete single manifest for this platform
                 let child_url = format!(
                     "https://{}/v2/{}/manifests/{}",
                     reference.registry, reference.repository, chosen_digest
                 );
                 let child_resp = self.http.get(&child_url).headers(headers).send().await?;
+                let child_resp = child_resp.error_for_status()?;
                 let child_bytes = child_resp.bytes().await?;
+                verify_sha256(chosen_digest, &child_bytes)?;
                 let single: SingleManifest = serde_json::from_slice(&child_bytes)
                     .context("Failed to parse concrete single manifest")?;
                 return Ok((single, chosen_digest.clone()));
@@ -525,6 +531,7 @@ impl OciClient {
         digest: &str,
         token: Option<&str>,
     ) -> Result<bytes::Bytes> {
+        sha256_hex(digest)?;
         let url = format!(
             "https://{}/v2/{}/blobs/{}",
             reference.registry, reference.repository, digest
@@ -550,17 +557,7 @@ impl OciClient {
 
         let bytes = resp.bytes().await?;
 
-        // Cryptographically verify SHA-256 digest of downloaded payload
-        if let Some(expected_hex) = digest.strip_prefix("sha256:") {
-            let actual_hex = format!("{:x}", Sha256::digest(&bytes));
-            if actual_hex != expected_hex {
-                bail!(
-                    "Cryptographic digest mismatch for blob: expected sha256:{}, got sha256:{}",
-                    expected_hex,
-                    actual_hex
-                );
-            }
-        }
+        verify_sha256(digest, &bytes)?;
 
         Ok(bytes)
     }

@@ -298,6 +298,17 @@ Decompiled PDF content 100% matches visible rendering.`,
       data = SAMPLE_DATA[sampleKey] || SAMPLE_DATA['indirect-injection-pdf'];
     }
 
+    data = {
+      ...data,
+      hash: 'not verified by this demo',
+      threatTitle: data.isThreat ? 'SIMULATION: Known text patterns detected' : 'SIMULATION: No known text patterns detected',
+      threatDesc: 'Local heuristic analysis only. No microVM was started and document safety has not been established.',
+      vmId: 'not started', bootTime: 'not measured', memRss: 'not measured',
+      cowStatus: 'not active', egressMode: 'not active', tokenBudget: 'not enforced',
+      terminalLogs: ['[SIMULATION] Local text analysis only; no guest execution or network enforcement.'],
+      rawDiff: 'SIMULATED ANALYSIS ONLY\n' + data.rawDiff,
+    };
+
     // Scroll smoothly to detonation workspace
     detonationView.style.display = 'block';
     detonationView.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -311,7 +322,7 @@ Decompiled PDF content 100% matches visible rendering.`,
 
     // Reset terminal
     terminalBody.innerHTML = '';
-    addTerminalLine('[    0.000000] Initializing Apple Silicon HVF MicroVM container...', 'term-dim');
+    addTerminalLine('[    0.000000] Simulation: preparing local text analysis...', 'term-dim');
 
     // Stage 1: Structural Analysis
     stepStatic.classList.add('step-active');
@@ -360,7 +371,7 @@ Decompiled PDF content 100% matches visible rendering.`,
             setTimeout(() => {
               stepAi.classList.remove('step-active');
               stepAi.classList.add('step-done');
-              detonationStatusText.textContent = data.isThreat ? 'Quarantined & Neutralized' : 'Verified Clean';
+              detonationStatusText.textContent = data.isThreat ? 'Simulation: patterns detected' : 'Simulation: no known patterns';
               detonationPulse.style.backgroundColor = data.isThreat ? 'var(--accent-rose)' : 'var(--accent-emerald)';
               detonationPulse.style.boxShadow = data.isThreat ? '0 0 10px var(--accent-rose)' : '0 0 10px var(--accent-emerald)';
 
@@ -416,7 +427,7 @@ Decompiled PDF content 100% matches visible rendering.`,
             <span class="threat-item-title">Zero Security Anomalies Found</span>
             <span class="threat-severity-tag tag-safe" style="background: rgba(16, 185, 129, 0.2); color: #a7f3d0; border: 1px solid rgba(16, 185, 129, 0.4);">Clean</span>
           </div>
-          <p class="threat-item-body">Document is free from hidden white-text injections, zero-width steganography, SSRF URLs, and macro scripts. Safe to pass to LLMs.</p>
+          <p class="threat-item-body">No known text patterns matched in this simulation. This does not establish document safety.</p>
         </div>
       `;
     } else {
@@ -509,6 +520,10 @@ Decompiled PDF content 100% matches visible rendering.`,
 
   // Client-side Custom File Analyzer
   function handleUserFileUpload(file) {
+    if (file.size > 1024 * 1024) {
+      window.alert('This text analysis demo accepts files up to 1 MiB.');
+      return;
+    }
     const reader = new FileReader();
 
     reader.onload = function(evt) {

@@ -1,3 +1,5 @@
+> Security and compatibility notes: [hardening report](docs/SECURITY-HARDENING.md). The document UI is a simulation; hardware detonation is not implemented.
+
 <div align="center">
 
 <img src="assets/logo.png" alt="CroSandbox Logo" width="240" />

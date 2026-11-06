@@ -11,6 +11,8 @@ defmodule Krun.Unstructured.Server do
   require Logger
 
   @default_port 4000
+  @max_header_bytes 16 * 1024
+  @max_body_bytes 1024 * 1024
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -19,15 +21,28 @@ defmodule Krun.Unstructured.Server do
   @impl true
   def init(opts) do
     port = Keyword.get(opts, :port, @default_port)
-    
+
     # Locate WebUI assets
     webui_dir =
       Keyword.get(opts, :webui_dir) ||
         find_webui_dir()
 
-    case :gen_tcp.listen(port, [:binary, packet: :raw, active: false, reuseaddr: true]) do
+    case :gen_tcp.listen(port, [
+           :binary,
+           ip: {127, 0, 0, 1},
+           packet: :raw,
+           active: false,
+           reuseaddr: true,
+           send_timeout: 5000,
+           send_timeout_close: true
+         ]) do
       {:ok, listen_socket} ->
-        Logger.info("[Krun.Unstructured] HTTP Server listening on http://127.0.0.1:#{port}/unstructured")
+        {:ok, {_address, port}} = :inet.sockname(listen_socket)
+
+        Logger.info(
+          "[Krun.Unstructured] HTTP Server listening on http://127.0.0.1:#{port}/unstructured"
+        )
+
         # Spawn acceptor loop
         spawn_link(fn -> acceptor_loop(listen_socket, webui_dir) end)
         {:ok, %{listen_socket: listen_socket, port: port, webui_dir: webui_dir}}
@@ -39,19 +54,26 @@ defmodule Krun.Unstructured.Server do
   end
 
   defp find_webui_dir do
-    candidates = [
-      Path.expand("../../../../webui", __DIR__),
-      Path.expand("../../webui", __DIR__),
-      "/Users/apple/libkrun-sdk/webui"
-    ]
-
-    Enum.find(candidates, &File.dir?/1) || "/Users/apple/libkrun-sdk/webui"
+    Path.expand("../../../../../../webui", __DIR__)
   end
 
   defp acceptor_loop(listen_socket, webui_dir) do
     case :gen_tcp.accept(listen_socket) do
       {:ok, client_socket} ->
-        spawn(fn -> handle_client(client_socket, webui_dir) end)
+        handler =
+          spawn(fn ->
+            receive do
+              {:serve, socket} -> handle_client(socket, webui_dir)
+            after
+              5000 -> :ok
+            end
+          end)
+
+        case :gen_tcp.controlling_process(client_socket, handler) do
+          :ok -> send(handler, {:serve, client_socket})
+          {:error, _} -> :gen_tcp.close(client_socket)
+        end
+
         acceptor_loop(listen_socket, webui_dir)
 
       {:error, :closed} ->
@@ -64,36 +86,116 @@ defmodule Krun.Unstructured.Server do
   end
 
   defp handle_client(socket, webui_dir) do
-    case :gen_tcp.recv(socket, 0, 5000) do
-      {:ok, data} ->
-        {method, path, headers, body} = parse_http_request(data)
-        response = route(method, path, headers, body, webui_dir)
-        :gen_tcp.send(socket, response)
-        :gen_tcp.close(socket)
+    deadline = System.monotonic_time(:millisecond) + 5000
 
-      {:error, _} ->
-        :gen_tcp.close(socket)
+    try do
+      response =
+        case read_request(socket, "", deadline) do
+          {:ok, {method, path, headers, body}} ->
+            {:ok, {_address, port}} = :inet.sockname(socket)
+            host = headers["host"]
+            origin = headers["origin"]
+            content_type = headers["content-type"] || ""
+
+            cond do
+              host not in ["localhost:#{port}", "127.0.0.1:#{port}"] ->
+                text_response(400, "Invalid Host header")
+
+              origin != nil and origin != "http://#{host}" ->
+                text_response(403, "Origin denied")
+
+              method == "POST" and
+                  String.downcase(hd(String.split(content_type, ";"))) != "application/json" ->
+                text_response(415, "Expected application/json")
+
+              true ->
+                route(method, path, headers, body, webui_dir)
+            end
+
+          {:error, :too_large} ->
+            text_response(413, "Request too large")
+
+          {:error, _} ->
+            text_response(400, "Invalid or incomplete request")
+        end
+
+      :gen_tcp.send(socket, response)
+    rescue
+      _ -> :gen_tcp.send(socket, text_response(400, "Invalid request"))
+    after
+      :gen_tcp.close(socket)
     end
   end
 
-  defp parse_http_request(data) do
-    case String.split(data, "\r\n\r\n", parts: 2) do
-      [header_part, body] ->
-        [request_line | header_lines] = String.split(header_part, "\r\n")
-        [method, path | _] = String.split(request_line, " ")
+  defp recv_before(socket, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+    if remaining > 0, do: :gen_tcp.recv(socket, 0, remaining), else: {:error, :timeout}
+  end
 
-        headers =
-          Enum.reduce(header_lines, %{}, fn line, acc ->
-            case String.split(line, ": ", parts: 2) do
-              [k, v] -> Map.put(acc, String.downcase(k), v)
-              _ -> acc
-            end
-          end)
+  defp read_request(socket, data, deadline) do
+    case :binary.match(data, "\r\n\r\n") do
+      {offset, 4} when offset <= @max_header_bytes ->
+        head = binary_part(data, 0, offset)
+        body = binary_part(data, offset + 4, byte_size(data) - offset - 4)
 
-        {method, path, headers, body}
+        with {:ok, method, path, headers} <- parse_headers(head),
+             {:ok, length} <- content_length(headers),
+             {:ok, body} <- read_body(socket, body, length, deadline) do
+          {:ok, {method, path, headers, body}}
+        end
+
+      :nomatch when byte_size(data) <= @max_header_bytes ->
+        with {:ok, chunk} <- recv_before(socket, deadline),
+             do: read_request(socket, data <> chunk, deadline)
 
       _ ->
-        {"GET", "/", %{}, ""}
+        {:error, :too_large}
+    end
+  end
+
+  defp read_body(_socket, _body, length, _deadline) when length > @max_body_bytes,
+    do: {:error, :too_large}
+
+  defp read_body(_socket, body, length, _deadline) when byte_size(body) >= length,
+    do: {:ok, binary_part(body, 0, length)}
+
+  defp read_body(socket, body, length, deadline) do
+    with {:ok, chunk} <- recv_before(socket, deadline),
+         do: read_body(socket, body <> chunk, length, deadline)
+  end
+
+  defp parse_headers(head) do
+    [request_line | lines] = String.split(head, "\r\n")
+
+    with [method, path, "HTTP/1.1"] <- String.split(request_line, " "),
+         true <- method in ["GET", "POST"] and String.starts_with?(path, "/") do
+      Enum.reduce_while(lines, {:ok, method, path, %{}}, fn line, {:ok, m, p, headers} ->
+        case String.split(line, ":", parts: 2) do
+          [name, value] ->
+            name = String.downcase(name)
+
+            if name == "" or Map.has_key?(headers, name) or name != String.trim(name) do
+              {:halt, {:error, :invalid_headers}}
+            else
+              {:cont, {:ok, m, p, Map.put(headers, name, String.trim(value))}}
+            end
+
+          _ ->
+            {:halt, {:error, :invalid_headers}}
+        end
+      end)
+    else
+      _ -> {:error, :invalid_request_line}
+    end
+  end
+
+  defp content_length(headers) do
+    value = headers["content-length"] || "0"
+
+    if Map.has_key?(headers, "transfer-encoding") or not Regex.match?(~r/^[0-9]+$/, value) do
+      {:error, :invalid_length}
+    else
+      {:ok, String.to_integer(value)}
     end
   end
 
@@ -107,7 +209,8 @@ defmodule Krun.Unstructured.Server do
   end
 
   # /unstructured: Main Cyber-Obsidian Web UI
-  defp route("GET", path, _headers, _body, webui_dir) when path in ["/unstructured", "/unstructured/"] do
+  defp route("GET", path, _headers, _body, webui_dir)
+       when path in ["/unstructured", "/unstructured/"] do
     index_file = Path.join(webui_dir, "index.html")
 
     case File.read(index_file) do
@@ -196,18 +299,13 @@ defmodule Krun.Unstructured.Server do
   end
 
   # API: MicroVM Detonation & Sanitization
-  defp route("POST", "/api/unstructured/detonate", _headers, body, _webui_dir) do
-    case parse_json(body) do
-      {:ok, params} ->
-        doc = params["document"] || params["text"] || ""
-        filename = params["filename"] || "document.pdf"
-
-        {:ok, report} = Krun.Unstructured.detonate(doc, filename: filename)
-        json_response(200, %{status: "ok", report: report})
-
-      {:error, _} ->
-        json_response(400, %{status: "error", message: "Invalid JSON body"})
-    end
+  defp route("POST", "/api/unstructured/detonate", _headers, _body, _webui_dir) do
+    json_response(501, %{
+      status: "error",
+      message:
+        "Hardware-isolated document detonation is not implemented. Use the text scan endpoint for heuristic analysis only.",
+      isolation_verified: false
+    })
   end
 
   # 404 Not Found fallback
@@ -291,7 +389,10 @@ defmodule Krun.Unstructured.Server do
 
   defp parse_json(body) do
     try do
-      {:ok, JSON.decode!(body)}
+      case JSON.decode!(body) do
+        value when is_map(value) -> {:ok, value}
+        _ -> {:error, :invalid_json}
+      end
     rescue
       _ -> {:error, :invalid_json}
     end

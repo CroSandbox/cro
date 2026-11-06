@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod client;
 pub mod daemon;
+pub(crate) mod digest;
 pub mod layout;
 pub mod reference;
 

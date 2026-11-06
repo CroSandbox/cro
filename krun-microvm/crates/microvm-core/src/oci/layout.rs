@@ -1,4 +1,5 @@
 use super::client::{parse_oci_config_from_json, SingleManifest};
+use super::digest::{sha256_hex, verify_sha256};
 use crate::config::OciConfig;
 use crate::rootfs::extract::extract_layer;
 use anyhow::{bail, Context, Result};
@@ -69,15 +70,12 @@ impl OciLayout {
                             .is_some_and(|v| v == target_tag)
                     })
                 })
-                .unwrap_or(&index.manifests[0])
+                .with_context(|| format!("OCI layout tag not found: {target_tag}"))?
         } else {
             &index.manifests[0]
         };
 
-        let manifest_hash = manifest_desc
-            .digest
-            .strip_prefix("sha256:")
-            .unwrap_or(&manifest_desc.digest);
+        let manifest_hash = sha256_hex(&manifest_desc.digest)?;
 
         let manifest_blob_path = layout_dir.join("blobs").join("sha256").join(manifest_hash);
 
@@ -89,6 +87,7 @@ impl OciLayout {
         }
 
         let manifest_bytes = fs::read(&manifest_blob_path)?;
+        verify_sha256(&manifest_desc.digest, &manifest_bytes)?;
         let manifest: SingleManifest = serde_json::from_slice(&manifest_bytes)
             .context("Failed to parse manifest JSON in OCI layout")?;
 
@@ -111,28 +110,12 @@ impl OciLayout {
         }
 
         // Read config blob
-        let config_hash = manifest
-            .config
-            .digest
-            .strip_prefix("sha256:")
-            .unwrap_or(&manifest.config.digest);
+        let config_hash = sha256_hex(&manifest.config.digest)?;
         let config_blob_path = layout_dir.join("blobs").join("sha256").join(config_hash);
-
-        let oci_config = if config_blob_path.exists() {
-            let config_bytes = fs::read(&config_blob_path)?;
-            let full_config: serde_json::Value = serde_json::from_slice(&config_bytes)?;
-            parse_oci_config_from_json(&full_config)
-        } else {
-            OciConfig {
-                entrypoint: Vec::new(),
-                cmd: vec!["/bin/sh".to_string()],
-                env: vec![
-                    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
-                ],
-                working_dir: Some("/".to_string()),
-                user: None,
-            }
-        };
+        let config_bytes = fs::read(&config_blob_path).context("Missing OCI config blob")?;
+        verify_sha256(&manifest.config.digest, &config_bytes)?;
+        let full_config: serde_json::Value = serde_json::from_slice(&config_bytes)?;
+        let oci_config = parse_oci_config_from_json(&full_config);
 
         // Unpack layers
         let staging_rootfs = cache_base.join("staging").join(&safe_digest);
@@ -142,10 +125,7 @@ impl OciLayout {
         fs::create_dir_all(&staging_rootfs)?;
 
         for (i, layer) in manifest.layers.iter().enumerate() {
-            let layer_hash = layer
-                .digest
-                .strip_prefix("sha256:")
-                .unwrap_or(&layer.digest);
+            let layer_hash = sha256_hex(&layer.digest)?;
             let layer_blob_path = layout_dir.join("blobs").join("sha256").join(layer_hash);
 
             if !layer_blob_path.exists() {
@@ -160,6 +140,7 @@ impl OciLayout {
             );
 
             let layer_bytes = fs::read(&layer_blob_path)?;
+            verify_sha256(&layer.digest, &layer_bytes)?;
             let cursor = std::io::Cursor::new(layer_bytes);
             let is_gz = layer
                 .media_type
@@ -189,6 +170,7 @@ impl OciLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
     use tempfile::tempdir;
 
     #[test]
@@ -203,54 +185,26 @@ mod tests {
         )
         .unwrap();
 
-        // 2. Create index.json
-        fs::write(
-            layout_dir.join("index.json"),
-            r#"{
-                "schemaVersion": 2,
-                "manifests": [
-                    {
-                        "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                        "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-                        "size": 100,
-                        "annotations": {
-                            "org.opencontainers.image.ref.name": "test-v1"
-                        }
-                    }
-                ]
-            }"#,
-        )
+        let config = br#"{"config":{"Cmd":["echo","offline layout works"]}}"#;
+        let config_hash = format!("{:x}", sha2::Sha256::digest(config));
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "config": {"digest": format!("sha256:{config_hash}"), "size": config.len()},
+            "layers": []
+        }))
         .unwrap();
-
-        // 3. Create blobs directory
+        let manifest_hash = format!("{:x}", sha2::Sha256::digest(&manifest));
         let blobs_dir = layout_dir.join("blobs/sha256");
         fs::create_dir_all(&blobs_dir).unwrap();
-
-        // Create dummy config blob
-        let config_hash = "2222222222222222222222222222222222222222222222222222222222222222";
+        fs::write(blobs_dir.join(config_hash), config).unwrap();
+        fs::write(blobs_dir.join(&manifest_hash), manifest).unwrap();
         fs::write(
-            blobs_dir.join(config_hash),
-            r#"{
-                "config": {
-                    "Cmd": ["echo", "offline layout works"]
-                }
-            }"#,
-        )
-        .unwrap();
-
-        // Create manifest blob
-        let manifest_hash = "1111111111111111111111111111111111111111111111111111111111111111";
-        fs::write(
-            blobs_dir.join(manifest_hash),
-            format!(
-                r#"{{
-                    "config": {{
-                        "digest": "sha256:{config_hash}",
-                        "size": 50
-                    }},
-                    "layers": []
-                }}"#
-            ),
+            layout_dir.join("index.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "manifests": [{"digest": format!("sha256:{manifest_hash}"),
+                    "annotations": {"org.opencontainers.image.ref.name": "test-v1"}}]
+            }))
+            .unwrap(),
         )
         .unwrap();
 
@@ -260,5 +214,47 @@ mod tests {
 
         assert!(rootfs.exists());
         assert_eq!(config.cmd, vec!["echo", "offline layout works"]);
+    }
+
+    #[test]
+    fn layout_rejects_untrusted_manifest_paths() {
+        let temp = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        fs::write(temp.path().join("oci-layout"), b"{}").unwrap();
+        for digest in [
+            "sha256:../../outside",
+            "sha256:/tmp/outside",
+            "sha512:abcdef",
+        ] {
+            fs::write(
+                temp.path().join("index.json"),
+                serde_json::to_vec(&serde_json::json!({"manifests": [{"digest": digest}]}))
+                    .unwrap(),
+            )
+            .unwrap();
+            let error = OciLayout::load(temp.path(), None, cache.path()).unwrap_err();
+            assert!(error.to_string().contains("digest"));
+        }
+        assert_eq!(fs::read_dir(cache.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn layout_rejects_tampered_manifest() {
+        let temp = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let hex = "a".repeat(64);
+        fs::write(temp.path().join("oci-layout"), b"{}").unwrap();
+        fs::create_dir_all(temp.path().join("blobs/sha256")).unwrap();
+        fs::write(temp.path().join("blobs/sha256").join(&hex), b"{}").unwrap();
+        fs::write(
+            temp.path().join("index.json"),
+            serde_json::to_vec(
+                &serde_json::json!({"manifests": [{"digest": format!("sha256:{hex}")}]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let error = OciLayout::load(temp.path(), None, cache.path()).unwrap_err();
+        assert!(error.to_string().contains("digest mismatch"));
     }
 }

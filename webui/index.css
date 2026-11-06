@@ -2123,3 +2123,5 @@ body {
     display: none;
   }
 }
+
+.simulation-notice { position: relative; z-index: 100; padding: 12px 24px; background: #422006; color: #fef3c7; border-bottom: 1px solid #a16207; font: 14px/1.5 system-ui, sans-serif; text-align: center; }

@@ -19,6 +19,7 @@ pub fn is_opaque_whiteout(file_name: &str) -> bool {
 pub fn apply_whiteout(root_dir: &Path, rel_path: &Path) -> Result<()> {
     // Sanitize path to prevent Zip-Slip / traversal in whiteout marker paths
     let safe_rel = crate::rootfs::tar_security::sanitize_tar_path(root_dir, rel_path)?;
+    crate::rootfs::tar_security::ensure_no_symlink_parents(root_dir, &safe_rel)?;
 
     let file_name = match safe_rel.file_name().and_then(|s| s.to_str()) {
         Some(s) => s.to_string(),
@@ -48,7 +49,7 @@ pub fn apply_whiteout(root_dir: &Path, rel_path: &Path) -> Result<()> {
             for entry in fs::read_dir(parent_dir)? {
                 let entry = entry?;
                 let path = entry.path();
-                if path.is_dir() {
+                if entry.file_type()?.is_dir() {
                     fs::remove_dir_all(&path)?;
                 } else {
                     fs::remove_file(&path)?;
@@ -56,9 +57,12 @@ pub fn apply_whiteout(root_dir: &Path, rel_path: &Path) -> Result<()> {
             }
         }
     } else if let Some(target_name) = file_name.strip_prefix(WHITEOUT_PREFIX) {
+        if target_name.is_empty() || target_name == "." || target_name == ".." {
+            anyhow::bail!("Invalid whiteout target: {:?}", target_name);
+        }
         let target_path = parent_dir.join(target_name);
         if target_path.exists() || target_path.is_symlink() {
-            if target_path.is_dir() {
+            if fs::symlink_metadata(&target_path)?.is_dir() {
                 fs::remove_dir_all(&target_path).with_context(|| {
                     format!("Failed to remove whiteout dir {}", target_path.display())
                 })?;
@@ -118,5 +122,50 @@ mod tests {
         let res = apply_whiteout(dir.path(), Path::new("../../../.wh.target"));
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("illegal '..'"));
+    }
+
+    #[test]
+    fn invalid_whiteouts_cannot_delete_root_or_parent() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("keep"), b"keep").unwrap();
+        for marker in [".wh.", ".wh..", ".wh..."] {
+            assert!(apply_whiteout(&root, Path::new(marker)).is_err());
+            assert!(root.join("keep").exists());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn whiteout_cannot_traverse_symlink_ancestor() {
+        use std::os::unix::fs::symlink;
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir_all(outside.join("nested")).unwrap();
+        fs::write(outside.join("nested/keep"), b"host").unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        for marker in ["escape/nested/.wh.keep", "escape/nested/.wh..wh..opq"] {
+            assert!(apply_whiteout(&root, Path::new(marker)).is_err());
+            assert!(outside.join("nested/keep").exists());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn whiteout_unlinks_symlink_without_deleting_its_target() {
+        use std::os::unix::fs::symlink;
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), b"host").unwrap();
+        symlink(&outside, root.join("link")).unwrap();
+        apply_whiteout(&root, Path::new(".wh.link")).unwrap();
+        assert!(!root.join("link").is_symlink());
+        assert!(outside.join("keep").exists());
     }
 }

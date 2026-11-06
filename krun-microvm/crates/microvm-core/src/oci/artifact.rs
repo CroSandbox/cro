@@ -109,23 +109,8 @@ pub(crate) async fn pull_artifact_impl(
             .fetch_blob_bytes(reference, &layer.digest, token_ref)
             .await?;
 
-        // Sanitize filename to prevent directory traversal / host overwrite attacks
-        let target_file = match crate::rootfs::tar_security::sanitize_tar_path(
-            &artifact_dir,
-            Path::new(&filename),
-        ) {
-            Ok(path) => path,
-            Err(e) => {
-                tracing::warn!(
-                    "Unsafe filename in artifact manifest annotation '{filename}': {e}. Falling back to safe basename."
-                );
-                let safe_basename = Path::new(&filename)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("blob.bin");
-                artifact_dir.join(safe_basename)
-            }
-        };
+        let target_file =
+            crate::rootfs::tar_security::sanitize_tar_path(&artifact_dir, Path::new(&filename))?;
 
         let is_tar = layer.media_type.as_ref().is_some_and(|m| m.contains("tar"))
             || filename.ends_with(".tar")
@@ -143,10 +128,11 @@ pub(crate) async fn pull_artifact_impl(
             saved_files.push(format!("{}/ (unpacked)", filename));
         } else {
             // Save raw file safely within artifact_dir
-            if let Some(parent) = target_file.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::write(&target_file, &blob_bytes)?;
+            crate::rootfs::tar_security::write_file_in_root(
+                &artifact_dir,
+                Path::new(&filename),
+                &blob_bytes,
+            )?;
             let rel_saved = target_file
                 .strip_prefix(&artifact_dir)
                 .map(|p| p.to_string_lossy().to_string())
@@ -167,7 +153,11 @@ pub(crate) async fn pull_artifact_impl(
         files: saved_files,
         created_at: now,
     };
-    let _ = fs::write(&meta_path, serde_json::to_string_pretty(&meta)?);
+    crate::rootfs::tar_security::write_file_in_root(
+        &artifact_dir,
+        Path::new(".krun_artifact.json"),
+        serde_json::to_string_pretty(&meta)?.as_bytes(),
+    )?;
 
     Ok(artifact_dir)
 }

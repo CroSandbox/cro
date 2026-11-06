@@ -1,14 +1,15 @@
+> Requires Elixir 1.18+ for the standard-library JSON module.
+> The document service performs local text pattern analysis. Hardware detonation
+> is not implemented: the HTTP detonation endpoint returns 501, and SDK reports
+> explicitly identify simulation with `isolation_verified: false`. Pattern matches
+> and sanitized text do not establish that a document is safe.
+
 # Krun Elixir SDK & Unstructured AI Threat Shield
 
-Official Elixir client for `libkrun-sdk`. Enables hardware-isolated microVM container execution, unstructured document partitioning, AI threat scanning, and Cloudflare Pingora zero-trust egress shielding.
-
-## Features
-
-- **Unstructured Document Ingestion (`Krun.Unstructured`)**: Parses PDFs, Word DOCX, Markdown, Text, and JSON into structured schema elements (`Title`, `NarrativeText`, `Header`, `ListItem`, `Table`, `CodeSnippet`) compatible with Unstructured.io, LangChain, and LlamaIndex.
-- **AI Agent Threat Shielding**: Real-time detection of indirect prompt injections, hidden white-text / 0.1pt font layers, zero-width Unicode steganography, and cloud metadata SSRF targets (`169.254.169.254`).
-- **Hardware-Isolated MicroVM Sandboxing**: Executes parsing inside an ephemeral Apple Silicon Hypervisor / Linux KVM container with APFS / Linux Copy-on-Write (`clonefile` / `reflink`).
-- **Cloudflare Pingora Zero-Trust Egress**: Transparently intercepts and logs all outbound traffic from document parsing processes.
-- **Integrated Cyber-Obsidian Web UI**: Embedded HTTP server serving the interactive interface at `/unstructured`.
+Elixir CLI SDK with local text partitioning, heuristic threat matching, and an
+HTTP demonstration interface. The text-analysis functions run in the Elixir
+process; they do not decode PDF/DOCX files or start isolated VMs. The web UI uses
+sample data and local analysis, and does not enforce real human approvals.
 
 ---
 
@@ -61,12 +62,12 @@ Invoice #88192
 
 if scan.is_threat do
   IO.puts("Threat Detected! Risk Score: #{scan.risk_score}")
-  # Safe sanitized text safe to pass to LLM agent:
+  # Review output before using it with any agent:
   IO.puts(scan.sanitized_text)
 end
 ```
 
-### 3. Full MicroVM Hardware Detonation & Telemetry
+### 3. Text Analysis Simulation
 
 ```elixir
 {:ok, report} = Krun.detonate(untrusted_pdf_text, filename: "invoice.pdf")
@@ -97,3 +98,14 @@ Visit:
 - **Partition API**: `POST http://localhost:4005/api/unstructured/partition`
 - **Threat Scan API**: `POST http://localhost:4005/api/unstructured/scan`
 - **Detonate API**: `POST http://localhost:4005/api/unstructured/detonate`
+
+## HTTP service boundaries
+
+The service binds to IPv4 loopback only. Requests require a local Host header
+including the listening port; cross-origin requests are rejected and POSTs require
+`application/json`. Header size is limited to 16 KiB, bodies to 1 MiB, and complete
+requests to five seconds. Chunked encoding and duplicate headers are rejected.
+
+Document strings are literal text, including strings that resemble local file
+paths. Trusted local SDK callers can explicitly opt into reading a file with
+`read_file: true`. This option is not accepted from HTTP request parameters.
