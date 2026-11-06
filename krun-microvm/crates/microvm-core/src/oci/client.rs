@@ -1,4 +1,6 @@
+use super::cache::{CacheEntry, CacheKind};
 use super::digest::{sha256_hex, verify_sha256};
+use super::manifest::{parse_oci_config_from_json, ManifestIndex, SingleManifest};
 use super::reference::ImageReference;
 use crate::config::OciConfig;
 use crate::rootfs::extract::extract_layer;
@@ -6,7 +8,6 @@ use anyhow::{bail, Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, WWW_AUTHENTICATE};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -20,87 +21,11 @@ struct DockerTokenResponse {
     access_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ManifestIndex {
-    manifests: Option<Vec<ManifestIndexEntry>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ManifestIndexEntry {
-    digest: String,
-    platform: Option<Platform>,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-struct Platform {
-    architecture: String,
-    os: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub(crate) struct SingleManifest {
-    #[serde(rename = "artifactType")]
-    pub(crate) artifact_type: Option<String>,
-    pub(crate) config: BlobDescriptor,
-    pub(crate) layers: Vec<BlobDescriptor>,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub(crate) struct BlobDescriptor {
-    #[serde(rename = "mediaType")]
-    pub(crate) media_type: Option<String>,
-    pub(crate) digest: String,
-    pub(crate) size: u64,
-    pub(crate) annotations: Option<std::collections::HashMap<String, String>>,
-}
-
 impl Default for OciClient {
     fn default() -> Self {
         Self::new()
     }
 }
-
-pub(crate) struct FileLock {
-    file: std::fs::File,
-}
-
-impl FileLock {
-    pub(crate) fn acquire(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)?;
-        unsafe {
-            use std::os::unix::io::AsRawFd;
-            if libc::flock(file.as_raw_fd(), libc::LOCK_EX) != 0 {
-                bail!(
-                    "Failed to acquire advisory lock on {}: {}",
-                    path.display(),
-                    std::io::Error::last_os_error()
-                );
-            }
-        }
-        Ok(Self { file })
-    }
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        unsafe {
-            use std::os::unix::io::AsRawFd;
-            let _ = libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
-}
-
-static STAGING_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl OciClient {
     pub fn new() -> Self {
@@ -282,25 +207,12 @@ impl OciClient {
         // 1. Fetch Manifest
         let (manifest, manifest_digest) = self.fetch_manifest(reference, token_ref).await?;
 
-        let safe_digest = manifest_digest.replace(':', "_");
-        let rootfs_dir = cache_base.join("rootfs").join(&safe_digest);
-        let config_file = cache_base
-            .join("configs")
-            .join(format!("{}.json", safe_digest));
-
-        // Acquire advisory lock to deduplicate concurrent pulls of this image
-        let lock_path = cache_base
-            .join("locks")
-            .join(format!("{}.lock", safe_digest));
-        let _lock = FileLock::acquire(&lock_path)?;
-
-        // Cache hit check after acquiring lock
-        if rootfs_dir.exists() && config_file.exists() {
-            let config_data = fs::read_to_string(&config_file)?;
-            if let Ok(cfg) = serde_json::from_str::<OciConfig>(&config_data) {
-                tracing::info!("RootFS cache hit for manifest {}", manifest_digest);
-                return Ok((rootfs_dir, cfg));
-            }
+        let cache =
+            CacheEntry::acquire_async(cache_base, CacheKind::Image, &manifest_digest).await?;
+        let rootfs_dir = cache.path().to_path_buf();
+        if let Some(cfg) = cache.read_metadata::<OciConfig>()? {
+            tracing::info!("RootFS cache hit for manifest {}", manifest_digest);
+            return Ok((rootfs_dir, cfg));
         }
 
         // 2. Fetch OCI Config blob (verifies digest)
@@ -312,16 +224,9 @@ impl OciClient {
 
         let oci_config = parse_oci_config_from_json(&full_config);
 
-        // 3. Unpack layers into isolated staging rootfs
-        let counter = STAGING_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let pid = std::process::id();
-        let staging_rootfs = cache_base
-            .join("staging")
-            .join(format!("{safe_digest}_{pid}_{counter}"));
-        if staging_rootfs.exists() {
-            let _ = fs::remove_dir_all(&staging_rootfs);
-        }
-        fs::create_dir_all(&staging_rootfs)?;
+        // A dropped or failed pull cleans up its private staging directory.
+        let transaction = cache.stage()?;
+        let staging_rootfs = transaction.path();
 
         tracing::info!(
             "Extracting {} layers for {} (streaming)...",
@@ -348,39 +253,15 @@ impl OciClient {
                 let downloaded = self
                     .fetch_blob_bytes(reference, &layer.digest, token_ref)
                     .await?;
-                if let Some(parent) = blob_cache_file.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                let temp_blob = cache_base
-                    .join("staging")
-                    .join(format!("blob_{layer_hash}_{pid}_{counter}.tmp"));
-                if let Some(parent) = temp_blob.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if std::fs::write(&temp_blob, &downloaded).is_ok() {
-                    let _ = std::fs::rename(&temp_blob, &blob_cache_file);
-                }
+                super::cache::atomic_write(&blob_cache_file, &downloaded)?;
                 downloaded
             };
 
             let cursor = std::io::Cursor::new(blob_bytes);
-            extract_layer(cursor, &staging_rootfs, true)?;
+            extract_layer(cursor, staging_rootfs, true)?;
         }
 
-        // 4. Atomically commit rootfs
-        if rootfs_dir.exists() {
-            let _ = fs::remove_dir_all(&rootfs_dir);
-        }
-        if let Some(parent) = rootfs_dir.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::rename(&staging_rootfs, &rootfs_dir)?;
-
-        // Save config
-        if let Some(parent) = config_file.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&config_file, serde_json::to_string_pretty(&oci_config)?)?;
+        transaction.commit(&oci_config)?;
 
         Ok((rootfs_dir, oci_config))
     }
@@ -563,61 +444,8 @@ impl OciClient {
     }
 }
 
-pub(crate) fn parse_oci_config_from_json(json: &serde_json::Value) -> OciConfig {
-    let config_node = json.get("config").unwrap_or(json);
-
-    let entrypoint = config_node
-        .get("Entrypoint")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| s.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let cmd = config_node
-        .get("Cmd")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| s.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let env = config_node
-        .get("Env")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|s| s.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let working_dir = config_node
-        .get("WorkingDir")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    let user = config_node
-        .get("User")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    OciConfig {
-        entrypoint,
-        cmd,
-        env,
-        working_dir,
-        user,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_parse_www_authenticate_header() {
@@ -638,52 +466,5 @@ mod tests {
         }
         assert_eq!(realm.as_deref(), Some("https://quay.io/v2/auth"));
         assert_eq!(service.as_deref(), Some("quay.io"));
-    }
-
-    #[test]
-    fn test_file_lock_lifecycle() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let lock_file = temp_dir.path().join("test.lock");
-
-        // 1. Acquire lock
-        let lock1 = FileLock::acquire(&lock_file).expect("Failed to acquire first lock");
-
-        // 2. Attempt non-blocking lock from another FD -> should fail
-        let file2 = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&lock_file)
-            .unwrap();
-        unsafe {
-            use std::os::unix::io::AsRawFd;
-            let ret = libc::flock(file2.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB);
-            assert_ne!(ret, 0, "Second non-blocking lock should fail while held");
-        }
-
-        // 3. Drop lock1
-        drop(lock1);
-
-        // 4. Now acquiring lock again should succeed
-        let _lock3 =
-            FileLock::acquire(&lock_file).expect("Should acquire lock after previous was dropped");
-    }
-
-    #[test]
-    fn test_parse_oci_config() {
-        let json = serde_json::json!({
-            "config": {
-                "Entrypoint": ["/bin/sh", "-c"],
-                "Cmd": ["echo hello"],
-                "Env": ["PATH=/usr/bin:/bin", "FOO=BAR"],
-                "WorkingDir": "/workspace",
-                "User": "1000:1000"
-            }
-        });
-        let parsed = parse_oci_config_from_json(&json);
-        assert_eq!(parsed.entrypoint, vec!["/bin/sh", "-c"]);
-        assert_eq!(parsed.cmd, vec!["echo hello"]);
-        assert_eq!(parsed.env, vec!["PATH=/usr/bin:/bin", "FOO=BAR"]);
-        assert_eq!(parsed.working_dir, Some("/workspace".to_string()));
-        assert_eq!(parsed.user, Some("1000:1000".to_string()));
     }
 }
