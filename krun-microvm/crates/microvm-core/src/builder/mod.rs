@@ -1,11 +1,15 @@
-//! Native in-process Dockerfile builder and local image registry.
+//! Dockerfile builder with VM-isolated RUN steps and a local image registry.
 //!
 //! Allows constructing OCI container rootfs images directly from Dockerfiles
 //! without requiring an external container runtime daemon.
 
+mod digest;
 pub mod dockerignore;
 pub mod executor;
 pub mod parser;
+mod run;
+
+pub use run::BuildStepConfig;
 
 pub use dockerignore::Dockerignore;
 pub use executor::{

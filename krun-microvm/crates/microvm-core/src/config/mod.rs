@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::path::Path;
 
 /// Configuration written to `/.krun_config.json` inside the rootfs.
@@ -32,12 +31,14 @@ impl KrunConfig {
 
     /// Writes this config as `/.krun_config.json` inside the given rootfs directory.
     pub fn write_to<P: AsRef<Path>>(&self, rootfs_path: P) -> Result<()> {
-        let dest = rootfs_path.as_ref().join(Self::FILE_NAME);
-        let data = serde_json::to_string_pretty(self)
-            .context("Failed to serialize krun config to JSON")?;
-        fs::write(&dest, data)
-            .with_context(|| format!("Failed to write krun config to {}", dest.display()))?;
-        Ok(())
+        let data =
+            serde_json::to_vec_pretty(self).context("Failed to serialize krun config to JSON")?;
+        crate::rootfs::tar_security::write_file_in_root(
+            rootfs_path.as_ref(),
+            Path::new(Self::FILE_NAME),
+            &data,
+        )
+        .context("Writing guest init configuration")
     }
 }
 

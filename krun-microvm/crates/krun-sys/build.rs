@@ -81,6 +81,16 @@ fn detect_libkrun() -> LibKrunVariant {
 }
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(libkrun_stub)");
+    // Old stub builds used the native library name. A cached libkrun.a can
+    // shadow the real dynamic library after a mode switch, even with dylib=krun.
+    let legacy_stub =
+        PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR missing")).join("libkrun.a");
+    match std::fs::remove_file(&legacy_stub) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("Failed to remove stale libkrun stub archive: {error}"),
+    }
     println!("cargo:rerun-if-changed=stub.c");
     println!("cargo:rerun-if-changed=compat.c");
     println!("cargo:rerun-if-env-changed=LIBKRUN_DIR");
@@ -123,7 +133,8 @@ fn main() {
                 panic!("Native libkrun library not found. Install libkrun or set LIBKRUN_DIR. For debug tests only, explicitly set FORCE_LIBKRUN_STUB=1.");
             }
             println!("cargo:warning=Explicit test mode: compiling libkrun stub; no hardware isolation is provided");
-            cc::Build::new().file("stub.c").compile("krun");
+            println!("cargo:rustc-cfg=libkrun_stub");
+            cc::Build::new().file("stub.c").compile("krun_test_stub");
         }
     }
 }

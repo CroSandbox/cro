@@ -81,10 +81,10 @@ layer are serialized while that pair is published; direct filesystem readers
 must not assume otherwise. Active guest mutation of cache/staging roots remains
 unsupported.
 
-Local Docker/Podman export ingestion, build-stage execution, and the local tag
-registry retain their existing orchestration. They are not claimed to use this
-transaction layer. Build-stage cleanup and tag-registry concurrency are separate
-future work.
+Local Docker/Podman export ingestion and the local tag registry retain separate
+orchestration. Dockerfile RUN steps now use dedicated build VMs and temporary
+stage ownership; see [isolated builds](ISOLATED-BUILDS.md). Tag-registry concurrency
+and crash recovery remain separate future work.
 
 ## Verification
 

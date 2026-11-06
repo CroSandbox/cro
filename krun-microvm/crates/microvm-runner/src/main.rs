@@ -91,8 +91,14 @@ fn validate_config(cfg: &RunnerConfig) -> Result<()> {
     Ok(())
 }
 
-fn run_vm(cfg: RunnerConfig) -> Result<()> {
+fn run_vm(
+    cfg: RunnerConfig,
+    build_command: Option<microvm_core::config::KrunConfig>,
+) -> Result<()> {
     validate_config(&cfg)?;
+    if let Some(command) = build_command.as_ref() {
+        validate_build_step(&cfg, command)?;
+    }
 
     if let Some(level) = cfg.log_level {
         let _ = krun_sys::set_log_level(level);
@@ -211,6 +217,16 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
             ctx.set_root(&cfg.root_path)
                 .context("Failed to set VM rootfs")?;
         }
+    }
+
+    if let Some(command) = build_command.as_ref() {
+        // JSON init config preserves argv/env exactly; the legacy libkrun
+        // kernel-command-line transport does not escape embedded quotes.
+        command
+            .write_to(&cfg.root_path)
+            .context("Writing build VM init configuration")?;
+        ctx.set_env(&[])
+            .context("Clearing inherited guest environment")?;
     }
 
     // Configure optional resource limits (rlimits)
@@ -390,7 +406,9 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
 
     // Install watchdog for hypervisor resilience (macOS SMP PSCI CPU_OFF panic)
     #[cfg(target_os = "macos")]
-    watchdog::install();
+    if build_command.is_none() {
+        watchdog::install();
+    }
 
     // 7. Enforce zero-trust host sandboxing before entering hypervisor
     sandbox::apply_sandbox(&cfg)?;
@@ -415,6 +433,9 @@ fn run_vm(cfg: RunnerConfig) -> Result<()> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("--build-step") {
+        return run_build_step(&args);
+    }
     if args.len() < 2 {
         eprintln!("Usage: microvm-runner --config <path-to-runner-config.json>");
         eprintln!("   or: microvm-runner <config-json>");
@@ -457,10 +478,96 @@ fn main() -> ExitCode {
         }
     };
 
-    if let Err(e) = run_vm(config) {
+    if let Err(e) = run_vm(config, None) {
         eprintln!("Error: {e:?}");
         return ExitCode::FAILURE;
     }
 
     ExitCode::SUCCESS
+}
+
+fn validate_build_step(
+    cfg: &RunnerConfig,
+    command: &microvm_core::config::KrunConfig,
+) -> Result<()> {
+    if krun_sys::USING_TEST_STUB {
+        bail!("Isolated builds require native libkrun; the test stub cannot execute RUN");
+    }
+    if command.cmd.is_empty() || command.cmd[0].is_empty() {
+        bail!("Empty build command");
+    }
+    if cfg.num_vcpus != 1
+        || cfg.detach
+        || !cfg.sandbox
+        || cfg.boot_payload.is_some()
+        || !cfg.virtiofs_mounts.is_empty()
+        || !cfg.disks.is_empty()
+        || !cfg.vsock_ports.is_empty()
+        || !cfg.port_forwards.is_empty()
+    {
+        bail!("Build VM configuration cannot expose host mounts/devices or detach");
+    }
+    Ok(())
+}
+
+fn run_build_step(args: &[String]) -> ExitCode {
+    let result = (|| -> Result<()> {
+        if args.len() != 3 {
+            bail!("Usage: microvm-runner --build-step <request.json>");
+        }
+        let request: microvm_core::builder::BuildStepConfig =
+            serde_json::from_slice(&std::fs::read(&args[2])?)
+                .context("Parsing build VM request")?;
+        run_vm(request.vm, Some(request.command))
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Isolated build VM failed: {error:#}");
+            ExitCode::from(125)
+        }
+    }
+}
+
+#[cfg(test)]
+mod build_tests {
+    use super::*;
+    use microvm_core::config::KrunConfig;
+
+    fn config() -> RunnerConfig {
+        serde_json::from_value(serde_json::json!({
+            "root_path": "/tmp/build-root", "num_vcpus": 1, "ram_mib": 512,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_stub_cannot_report_successful_build_execution() {
+        let result = validate_build_step(
+            &config(),
+            &KrunConfig::new(vec!["/bin/true".into()], vec![], None),
+        );
+        assert_eq!(result.is_err(), krun_sys::USING_TEST_STUB);
+    }
+
+    #[test]
+    fn build_mode_rejects_detach_and_unsandboxed_execution() {
+        let command = KrunConfig::new(vec!["/bin/true".into()], vec![], None);
+        let mut detached = config();
+        detached.detach = true;
+        assert!(validate_build_step(&detached, &command).is_err());
+        let mut unsandboxed = config();
+        unsandboxed.sandbox = false;
+        assert!(validate_build_step(&unsandboxed, &command).is_err());
+    }
+
+    #[test]
+    fn build_mode_rejects_additional_host_mounts() {
+        let command = KrunConfig::new(vec!["/bin/true".into()], vec![], None);
+        let mut config = config();
+        config
+            .virtiofs_mounts
+            .push(microvm_core::types::VirtioFsMount::new("host", "/", false));
+        assert!(validate_build_step(&config, &command).is_err());
+    }
 }

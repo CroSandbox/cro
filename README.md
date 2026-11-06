@@ -1,5 +1,6 @@
 > Security and compatibility notes: [hardening report](docs/SECURITY-HARDENING.md). The document UI is a simulation; hardware detonation is not implemented.
 > Cache design: [architecture notes](docs/CACHE-ARCHITECTURE.md).
+> Dockerfile RUN: [isolated build execution and requirements](docs/ISOLATED-BUILDS.md).
 
 <div align="center">
 
