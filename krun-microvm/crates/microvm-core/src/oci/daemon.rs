@@ -1,4 +1,4 @@
-use super::client::parse_oci_config_from_json;
+use super::manifest::parse_oci_config_from_json;
 use crate::config::OciConfig;
 use crate::rootfs::extract::extract_layer;
 use anyhow::{Context, Result};

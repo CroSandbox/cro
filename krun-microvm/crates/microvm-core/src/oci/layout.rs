@@ -1,5 +1,6 @@
-use super::client::{parse_oci_config_from_json, SingleManifest};
+use super::cache::{CacheEntry, CacheKind};
 use super::digest::{sha256_hex, verify_sha256};
+use super::manifest::{parse_oci_config_from_json, SingleManifest};
 use crate::config::OciConfig;
 use crate::rootfs::extract::extract_layer;
 use anyhow::{bail, Context, Result};
@@ -91,22 +92,14 @@ impl OciLayout {
         let manifest: SingleManifest = serde_json::from_slice(&manifest_bytes)
             .context("Failed to parse manifest JSON in OCI layout")?;
 
-        let safe_digest = format!("sha256_{}", manifest_hash);
-        let rootfs_dir = cache_base.join("rootfs").join(&safe_digest);
-        let config_file = cache_base
-            .join("configs")
-            .join(format!("{}.json", safe_digest));
-
-        // Cache hit check
-        if rootfs_dir.exists() && config_file.exists() {
-            let config_data = fs::read_to_string(&config_file)?;
-            if let Ok(cfg) = serde_json::from_str::<OciConfig>(&config_data) {
-                tracing::info!(
-                    "RootFS cache hit for OCI layout manifest {}",
-                    manifest_desc.digest
-                );
-                return Ok((rootfs_dir, cfg));
-            }
+        let cache = CacheEntry::acquire(cache_base, CacheKind::Image, &manifest_desc.digest)?;
+        let rootfs_dir = cache.path().to_path_buf();
+        if let Some(cfg) = cache.read_metadata::<OciConfig>()? {
+            tracing::info!(
+                "RootFS cache hit for OCI layout manifest {}",
+                manifest_desc.digest
+            );
+            return Ok((rootfs_dir, cfg));
         }
 
         // Read config blob
@@ -117,12 +110,8 @@ impl OciLayout {
         let full_config: serde_json::Value = serde_json::from_slice(&config_bytes)?;
         let oci_config = parse_oci_config_from_json(&full_config);
 
-        // Unpack layers
-        let staging_rootfs = cache_base.join("staging").join(&safe_digest);
-        if staging_rootfs.exists() {
-            let _ = fs::remove_dir_all(&staging_rootfs);
-        }
-        fs::create_dir_all(&staging_rootfs)?;
+        let transaction = cache.stage()?;
+        let staging_rootfs = transaction.path();
 
         for (i, layer) in manifest.layers.iter().enumerate() {
             let layer_hash = sha256_hex(&layer.digest)?;
@@ -147,21 +136,10 @@ impl OciLayout {
                 .as_ref()
                 .is_none_or(|m| m.contains("gzip") || m.ends_with(".tar+gzip"));
 
-            extract_layer(cursor, &staging_rootfs, is_gz)?;
+            extract_layer(cursor, staging_rootfs, is_gz)?;
         }
 
-        if rootfs_dir.exists() {
-            let _ = fs::remove_dir_all(&rootfs_dir);
-        }
-        if let Some(parent) = rootfs_dir.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::rename(&staging_rootfs, &rootfs_dir)?;
-
-        if let Some(parent) = config_file.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&config_file, serde_json::to_string_pretty(&oci_config)?)?;
+        transaction.commit(&oci_config)?;
 
         Ok((rootfs_dir, oci_config))
     }
@@ -214,6 +192,48 @@ mod tests {
 
         assert!(rootfs.exists());
         assert_eq!(config.cmd, vec!["echo", "offline layout works"]);
+    }
+
+    #[test]
+    fn failed_layout_extraction_leaves_no_partial_cache() {
+        let temp = tempdir().unwrap();
+        let cache = tempdir().unwrap();
+        let blobs = temp.path().join("blobs/sha256");
+        fs::create_dir_all(&blobs).unwrap();
+        fs::write(temp.path().join("oci-layout"), b"{}").unwrap();
+        let config = b"{}";
+        let config_hash = format!("{:x}", sha2::Sha256::digest(config));
+        fs::write(blobs.join(&config_hash), config).unwrap();
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "config": {"digest": format!("sha256:{config_hash}"), "size": 2},
+            "layers": [{"digest": format!("sha256:{}", "b".repeat(64)), "size": 1}]
+        }))
+        .unwrap();
+        let manifest_hash = format!("{:x}", sha2::Sha256::digest(&manifest));
+        fs::write(blobs.join(&manifest_hash), &manifest).unwrap();
+        fs::write(
+            temp.path().join("index.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "manifests": [{"digest": format!("sha256:{manifest_hash}")}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(OciLayout::load(temp.path(), None, cache.path()).is_err());
+        assert_eq!(
+            fs::read_dir(cache.path().join("staging")).unwrap().count(),
+            0
+        );
+        assert!(!cache
+            .path()
+            .join("rootfs")
+            .join(format!("sha256_{manifest_hash}"))
+            .exists());
+        assert!(!cache
+            .path()
+            .join("configs")
+            .join(format!("sha256_{manifest_hash}.json"))
+            .exists());
     }
 
     #[test]

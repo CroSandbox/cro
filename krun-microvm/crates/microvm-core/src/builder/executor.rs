@@ -2,6 +2,7 @@ use super::dockerignore::Dockerignore;
 use super::parser::{Dockerfile, Instruction};
 use crate::config::OciConfig;
 use crate::exec::{exec_in_guest_rootfs, ExecRequest};
+use crate::oci::cache::{CacheEntry, CacheKind};
 use crate::oci::client::OciClient;
 use crate::oci::reference::ImageReference;
 use crate::rootfs::clone_rootfs;
@@ -481,29 +482,14 @@ impl BuildEngine {
         hasher.update(&config_bytes);
         let digest_hex = hex::encode(hasher.finalize());
         let digest = format!("sha256:{digest_hex}");
-        let safe_digest = digest.replace(':', "_");
-
-        // Commit final rootfs to cache_base/rootfs/<safe_digest>
-        let target_rootfs = self.options.cache_base.join("rootfs").join(&safe_digest);
-        if target_rootfs.exists() {
-            let _ = fs::remove_dir_all(&target_rootfs);
-        }
-        if let Some(parent) = target_rootfs.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        clone_rootfs(&final_stage.rootfs, &target_rootfs)
-            .context("Failed to commit built rootfs to cache")?;
-
-        // Save config to cache_base/configs/<safe_digest>.json
-        let target_config_file = self
-            .options
-            .cache_base
-            .join("configs")
-            .join(format!("{safe_digest}.json"));
-        if let Some(parent) = target_config_file.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&target_config_file, &config_bytes)?;
+        let cache =
+            CacheEntry::acquire_async(&self.options.cache_base, CacheKind::Image, &digest).await?;
+        let target_rootfs = cache.path().to_path_buf();
+        let target_config_file = cache.metadata_path().to_path_buf();
+        let transaction = cache.stage()?;
+        clone_rootfs(&final_stage.rootfs, transaction.path())
+            .context("Failed to stage built rootfs")?;
+        transaction.commit(&final_stage.config)?;
 
         // Register local tag if provided
         if let Some(ref tag) = self.options.tag {

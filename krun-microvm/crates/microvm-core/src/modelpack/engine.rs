@@ -4,6 +4,7 @@
 //! CNCF ModelPack Engine for pulling, caching, inspecting, and listing models.
 
 use super::spec::*;
+use crate::oci::cache::{CacheEntry, CacheKind};
 use crate::oci::digest::{sha256_hex, verify_sha256};
 use crate::oci::{ImageReference, OciClient};
 use crate::rootfs::extract::extract_layer;
@@ -65,32 +66,21 @@ impl ModelEngine {
                 );
             }
         }
-        let safe_digest = manifest_digest.replace(':', "_");
-        let model_dir = cache_base.join("models").join(&safe_digest);
-        let meta_path = model_dir.join(".modelpack.json");
-
-        // Cache hit check
-        if model_dir.exists() && meta_path.exists() {
-            tracing::info!(
-                "Model cache hit for '{}' ({})",
-                reference.canonical_name(),
-                manifest_digest
-            );
-            return Ok(model_dir);
+        let cache =
+            CacheEntry::acquire_async(cache_base, CacheKind::Model, &manifest_digest).await?;
+        let model_dir = cache.path().to_path_buf();
+        if let Some(metadata) = cache.read_metadata::<CachedModelMetadata>()? {
+            if metadata.digest == manifest_digest {
+                tracing::info!(
+                    "Model cache hit for '{}' ({})",
+                    reference.canonical_name(),
+                    manifest_digest
+                );
+                return Ok(model_dir);
+            }
         }
-
-        let staging_dir = cache_base
-            .join("models")
-            .join(format!(".staging_{}", safe_digest));
-        if staging_dir.exists() {
-            let _ = fs::remove_dir_all(&staging_dir);
-        }
-        fs::create_dir_all(&staging_dir).with_context(|| {
-            format!(
-                "Failed to create model staging directory: {}",
-                staging_dir.display()
-            )
-        })?;
+        let transaction = cache.stage()?;
+        let staging_dir = transaction.path();
 
         tracing::info!(
             "Downloading ModelPack {} ({} layers)...",
@@ -144,7 +134,7 @@ impl ModelEngine {
                     .is_some_and(|m| m.contains("gzip"))
                     || layer.digest.ends_with(".tar.gz");
                 let cursor = std::io::Cursor::new(blob_bytes);
-                extract_layer(cursor, &staging_dir, is_gz).with_context(|| {
+                extract_layer(cursor, staging_dir, is_gz).with_context(|| {
                     format!("Failed to unpack ModelPack layer {}", layer.digest)
                 })?;
             } else {
@@ -160,7 +150,7 @@ impl ModelEngine {
                     });
 
                 crate::rootfs::tar_security::write_file_in_root(
-                    &staging_dir,
+                    staging_dir,
                     Path::new(&filename),
                     &blob_bytes,
                 )?;
@@ -168,8 +158,7 @@ impl ModelEngine {
         }
 
         // 4. Index files and compute total size
-        let (scanned_files, total_size, inferred_format) =
-            Self::scan_directory_files(&staging_dir)?;
+        let (scanned_files, total_size, inferred_format) = Self::scan_directory_files(staging_dir)?;
         if model_config.files.is_empty() {
             model_config.files = scanned_files;
         }
@@ -199,26 +188,7 @@ impl ModelEngine {
             path: model_dir.clone(),
         };
 
-        crate::rootfs::tar_security::write_file_in_root(
-            &staging_dir,
-            Path::new(".modelpack.json"),
-            serde_json::to_string_pretty(&metadata)?.as_bytes(),
-        )?;
-
-        // 6. Commit staging directory to model_dir
-        if model_dir.exists() {
-            let _ = fs::remove_dir_all(&model_dir);
-        }
-        if let Some(parent) = model_dir.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::rename(&staging_dir, &model_dir).with_context(|| {
-            format!(
-                "Failed to commit model directory from {} to {}",
-                staging_dir.display(),
-                model_dir.display()
-            )
-        })?;
+        transaction.commit(&metadata)?;
 
         tracing::info!(
             "Successfully cached ModelPack '{}' at {}",

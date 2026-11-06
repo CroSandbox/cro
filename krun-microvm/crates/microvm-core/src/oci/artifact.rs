@@ -1,7 +1,8 @@
+use super::cache::{CacheEntry, CacheKind};
 use super::client::OciClient;
 use super::reference::ImageReference;
 use crate::rootfs::extract::extract_layer;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,18 +53,17 @@ pub(crate) async fn pull_artifact_impl(
 
     // 1. Fetch manifest
     let (manifest, manifest_digest) = client.fetch_manifest(reference, token_ref).await?;
-    let safe_digest = manifest_digest.replace(':', "_");
-    let artifact_dir = cache_base.join("artifacts").join(&safe_digest);
-
-    // Cache hit check
-    let meta_path = artifact_dir.join(".krun_artifact.json");
-    if artifact_dir.exists() && meta_path.exists() {
-        tracing::info!("Artifact cache hit for {}", manifest_digest);
-        return Ok(artifact_dir);
+    let cache =
+        CacheEntry::acquire_async(cache_base, CacheKind::Artifact, &manifest_digest).await?;
+    let artifact_dir = cache.path().to_path_buf();
+    if let Some(metadata) = cache.read_metadata::<ArtifactMetadata>()? {
+        if metadata.digest == manifest_digest {
+            tracing::info!("Artifact cache hit for {}", manifest_digest);
+            return Ok(artifact_dir);
+        }
     }
-
-    fs::create_dir_all(&artifact_dir)
-        .with_context(|| format!("Failed to create artifact dir: {}", artifact_dir.display()))?;
+    let transaction = cache.stage()?;
+    let staging_dir = transaction.path();
 
     let mut saved_files = Vec::new();
     tracing::info!(
@@ -110,7 +110,7 @@ pub(crate) async fn pull_artifact_impl(
             .await?;
 
         let target_file =
-            crate::rootfs::tar_security::sanitize_tar_path(&artifact_dir, Path::new(&filename))?;
+            crate::rootfs::tar_security::sanitize_tar_path(staging_dir, Path::new(&filename))?;
 
         let is_tar = layer.media_type.as_ref().is_some_and(|m| m.contains("tar"))
             || filename.ends_with(".tar")
@@ -124,17 +124,17 @@ pub(crate) async fn pull_artifact_impl(
                 .as_ref()
                 .is_some_and(|m| m.contains("gzip"))
                 || filename.ends_with(".tar.gz");
-            extract_layer(cursor, &artifact_dir, is_gz)?;
+            extract_layer(cursor, staging_dir, is_gz)?;
             saved_files.push(format!("{}/ (unpacked)", filename));
         } else {
             // Save raw file safely within artifact_dir
             crate::rootfs::tar_security::write_file_in_root(
-                &artifact_dir,
+                staging_dir,
                 Path::new(&filename),
                 &blob_bytes,
             )?;
             let rel_saved = target_file
-                .strip_prefix(&artifact_dir)
+                .strip_prefix(staging_dir)
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or(filename);
             saved_files.push(rel_saved);
@@ -153,11 +153,7 @@ pub(crate) async fn pull_artifact_impl(
         files: saved_files,
         created_at: now,
     };
-    crate::rootfs::tar_security::write_file_in_root(
-        &artifact_dir,
-        Path::new(".krun_artifact.json"),
-        serde_json::to_string_pretty(&meta)?.as_bytes(),
-    )?;
+    transaction.commit(&meta)?;
 
     Ok(artifact_dir)
 }
