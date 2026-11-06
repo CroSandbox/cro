@@ -40,6 +40,74 @@ jobs:
       - name: Run isolated installer tests
         run: python3 -m unittest discover -s tests -v
 
+      - name: Run Python SDK security tests
+        run: python3 -m unittest discover -s krun-microvm/sdks/python/tests -v
+
+  dependency-audit:
+    name: Rust dependency advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: cargo audit --file krun-microvm/Cargo.lock --deny yanked
+
+  sdk-typescript:
+    name: TypeScript SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: krun-microvm/sdks/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: krun-microvm/sdks/typescript/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm test
+      - run: npm audit --audit-level=low
+
+  sdk-go:
+    name: Go SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: krun-microvm/sdks/go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - run: go test ./...
+      - run: go vet ./...
+      - name: Audit embedded networking bridge
+        working-directory: krun-microvm/crates/libgvproxy-sys/gvproxy-bridge
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -scan=module
+
+  sdk-elixir:
+    name: Elixir HTTP security
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: krun-microvm/sdks/elixir
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "27"
+          elixir-version: "1.18"
+      - run: mix test --warnings-as-errors
+
   # =========================================================================
   #  Formatting — fast gate, no deps needed beyond rustfmt
   # =========================================================================
@@ -156,7 +224,7 @@ jobs:
       - name: Run test suite
         env:
           FORCE_LIBKRUN_STUB: ${{ matrix.use_stub }}
-        run: cargo test --workspace --verbose
+        run: cargo test --locked --workspace --verbose
 
   # =========================================================================
   #  Build Release Binaries (Strictly Native — No Stubs)
@@ -204,7 +272,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends protobuf-compiler libepoxy-dev libgbm-dev
           # Build real libkrun submodule for native release linking
           if [ -d "../libkrun" ]; then
-            make -C ../libkrun || true
+            make -C ../libkrun
           fi
 
       - name: Install system dependencies and native libkrun (macOS)
@@ -215,7 +283,7 @@ jobs:
           brew install libkrun
 
       - name: Build release binaries (Real libkrun)
-        run: cargo build --workspace --release --target ${{ matrix.target }}
+        run: cargo build --locked --workspace --release --target ${{ matrix.target }}
 
       - name: Verify release binary links to real libkrun (macOS)
         if: runner.os == 'macOS'

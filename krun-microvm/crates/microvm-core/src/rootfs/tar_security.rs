@@ -45,6 +45,9 @@ pub fn sanitize_tar_path(root_dir: &Path, entry_name: &Path) -> Result<PathBuf> 
 /// Verifies that no parent directory component between `root_dir` and `target` is a symlink.
 /// This prevents writing through a pre-existing symlink planted by an earlier layer.
 pub fn ensure_no_symlink_parents(root_dir: &Path, target: &Path) -> Result<()> {
+    if root_dir.is_symlink() {
+        bail!("Security violation: extraction root is a symlink");
+    }
     let mut current = root_dir.to_path_buf();
     let rel = match target.strip_prefix(root_dir) {
         Ok(r) => r,
@@ -116,6 +119,26 @@ pub fn validate_symlink_target(root_dir: &Path, symlink_path: &Path, target: &Pa
             }
         }
     }
+    Ok(())
+}
+
+/// Write an untrusted archive/artifact filename without following existing leaf links.
+/// The caller must own the root exclusively while populating it.
+pub(crate) fn write_file_in_root(root: &Path, entry: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let target = sanitize_tar_path(root, entry)?;
+    ensure_no_symlink_parents(root, &target)?;
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if target.exists() || target.is_symlink() {
+        std::fs::remove_file(&target)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    file.write_all(bytes)?;
     Ok(())
 }
 
@@ -211,5 +234,24 @@ mod tests {
         // Target path with no symlinks should be accepted
         let safe_target = real_dir.join("safe_file");
         assert!(ensure_no_symlink_parents(root, &safe_target).is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn artifact_write_rejects_traversal_and_symlink_parents() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+        assert!(write_file_in_root(&root, Path::new("../outside/pwned"), b"bad").is_err());
+        assert!(write_file_in_root(&root, Path::new("escape/pwned"), b"bad").is_err());
+        assert!(!outside.join("pwned").exists());
+        std::fs::write(outside.join("keep"), b"original").unwrap();
+        std::os::unix::fs::symlink(outside.join("keep"), root.join("leaf")).unwrap();
+        write_file_in_root(&root, Path::new("leaf"), b"new").unwrap();
+        assert_eq!(std::fs::read(outside.join("keep")).unwrap(), b"original");
+        assert_eq!(std::fs::read(root.join("leaf")).unwrap(), b"new");
     }
 }

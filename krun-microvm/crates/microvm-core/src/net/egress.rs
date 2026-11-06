@@ -415,7 +415,18 @@ impl LlmTokenBudget {
     }
 
     pub fn record_tokens(&self, count: u64) {
-        self.consumed_tokens.fetch_add(count, Ordering::Relaxed);
+        let mut current = self.consumed_tokens.load(Ordering::Relaxed);
+        loop {
+            match self.consumed_tokens.compare_exchange_weak(
+                current,
+                current.saturating_add(count),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     pub fn total_consumed(&self) -> u64 {
@@ -667,6 +678,40 @@ pub fn parse_content_length(headers: &str) -> Option<usize> {
     None
 }
 
+// Reject ambiguous framing before authorization or secret substitution.
+fn validate_request_framing(headers: &str) -> Result<Option<usize>> {
+    let mut length = None;
+    let mut seen_host = false;
+    for line in headers.lines().skip(1) {
+        let (name, value) = line.split_once(':').context("Malformed HTTP header")?;
+        if name.trim() != name
+            || name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+        {
+            bail!("Invalid HTTP header name");
+        }
+        if name.eq_ignore_ascii_case("transfer-encoding") || name.eq_ignore_ascii_case("upgrade") {
+            bail!("Unsupported HTTP transfer encoding or upgrade");
+        }
+        if name.eq_ignore_ascii_case("host") {
+            if seen_host {
+                bail!("Duplicate Host header");
+            }
+            seen_host = true;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            let value = value.trim();
+            if length.is_some() || value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                bail!("Invalid or duplicate Content-Length");
+            }
+            length = Some(value.parse::<usize>().context("Invalid Content-Length")?);
+        }
+    }
+    Ok(length)
+}
+
 pub fn adjust_content_length(headers: &str, new_body_len: usize) -> String {
     let mut updated_lines = Vec::new();
     let mut found_cl = false;
@@ -790,6 +835,9 @@ async fn handle_client(
         }
         buf.extend_from_slice(&temp[..n]);
         if let Some(pos) = find_header_end(&buf) {
+            if pos.0 > 64 * 1024 {
+                bail!("HTTP headers exceed maximum size");
+            }
             break pos;
         }
         if buf.len() > 64 * 1024 {
@@ -798,6 +846,17 @@ async fn handle_client(
     };
 
     let request_head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+    let content_len = match validate_request_framing(&request_head) {
+        Ok(length) => length,
+        Err(error) => {
+            client
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+            return Err(error);
+        }
+    };
     let first_line = request_head.lines().next().unwrap_or_default();
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
@@ -816,6 +875,18 @@ async fn handle_client(
     });
 
     if method.eq_ignore_ascii_case("CONNECT") {
+        // Opaque tunnels cannot enforce content-based secret scopes or token limits.
+        if budget.max_tokens.is_some() || !secrets.mapping.is_empty() {
+            blocked_requests.fetch_add(1, Ordering::Relaxed);
+            let body = "CONNECT denied: configured content policies require inspectable HTTP";
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            client.write_all(response.as_bytes()).await?;
+            return Ok(());
+        }
         // HTTPS tunneling: CONNECT target:port HTTP/1.1
         let (host, port) = parse_host_port(&target, 443)?;
 
@@ -934,7 +1005,6 @@ async fn handle_client(
         }
 
         // Read complete body if Content-Length is present
-        let content_len = parse_content_length(&request_head);
         if let Some(expected_len) = content_len {
             if expected_len > 32 * 1024 * 1024 {
                 bail!("Request body exceeds maximum allowed size (32 MiB)");
@@ -942,7 +1012,7 @@ async fn handle_client(
             while buf.len() < body_start + expected_len {
                 let n = client.read(&mut temp).await?;
                 if n == 0 {
-                    break;
+                    bail!("Incomplete HTTP request body");
                 }
                 buf.extend_from_slice(&temp[..n]);
             }
@@ -950,7 +1020,8 @@ async fn handle_client(
 
         // Apply secret substitution on outbound headers and body after scope check
         let headers_raw = &buf[..header_end];
-        let body_raw = &buf[body_start..];
+        // Only the authorized request body is forwarded; discard pipelined bytes.
+        let body_raw = &buf[body_start..body_start + content_len.unwrap_or(0)];
 
         if let Err(e) = secrets.check_action_authorized(headers_raw, &method, &host, &path) {
             blocked_requests.fetch_add(1, Ordering::Relaxed);
@@ -1437,5 +1508,123 @@ mod tests {
         let n = client.read(&mut resp).await.unwrap();
         let resp_str = String::from_utf8_lossy(&resp[..n]);
         assert!(resp_str.contains("200 OK"));
+    }
+
+    #[test]
+    fn ambiguous_http_framing_is_rejected() {
+        for header in [
+            "Content-Length: 1\r\nContent-Length: 2",
+            "Content-Length: -1",
+            "Transfer-Encoding: chunked",
+            "Host: a\r\nHost: b",
+            "Content-Length : 1",
+            "Upgrade: websocket",
+        ] {
+            assert!(validate_request_framing(&format!("GET / HTTP/1.1\r\n{header}")).is_err());
+        }
+        assert_eq!(
+            validate_request_framing("POST / HTTP/1.1\r\nContent-Length: 12").unwrap(),
+            Some(12)
+        );
+    }
+
+    #[test]
+    fn token_accounting_cannot_wrap_around() {
+        let budget = LlmTokenBudget::new(Some(100));
+        budget.record_tokens(u64::MAX);
+        budget.record_tokens(1);
+        assert!(budget.is_exceeded());
+        assert_eq!(budget.total_consumed(), u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn opaque_tunnels_cannot_bypass_content_policies() {
+        for (secrets, budget) in [
+            (
+                SecretSubstitution::default(),
+                LlmTokenBudget::new(Some(100)),
+            ),
+            (
+                SecretSubstitution::new(&[("KEY".into(), "secret".into())]),
+                LlmTokenBudget::default(),
+            ),
+        ] {
+            let proxy = EgressProxyServer::start(
+                EgressPolicy::new(vec!["example.com:443".into()]),
+                secrets,
+                budget,
+            )
+            .await
+            .unwrap();
+            let mut client = TcpStream::connect(("127.0.0.1", proxy.port()))
+                .await
+                .unwrap();
+            client
+                .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+                .await
+                .unwrap();
+            let mut response = Vec::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client.read_to_end(&mut response),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(String::from_utf8_lossy(&response).contains("403 Forbidden"));
+            assert_eq!(proxy.blocked_count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn pipelined_requests_are_not_forwarded_under_first_request_scope() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            let mut chunk = [0; 8192];
+            loop {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    stream.read(&mut chunk),
+                )
+                .await
+                {
+                    Ok(Ok(0)) | Err(_) => break,
+                    Ok(Ok(n)) => received.extend_from_slice(&chunk[..n]),
+                    Ok(Err(e)) => panic!("{e}"),
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                .await
+                .unwrap();
+            received
+        });
+        let proxy = EgressProxyServer::start(
+            EgressPolicy::new(vec![upstream.to_string()]),
+            SecretSubstitution::new(&[("KEY".into(), "HOST_SECRET".into())]),
+            LlmTokenBudget::default(),
+        )
+        .await
+        .unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", proxy.port()))
+            .await
+            .unwrap();
+        let request = format!("GET http://{upstream}/safe HTTP/1.1\r\nHost: {upstream}\r\n\r\nPOST /unauthorized HTTP/1.1\r\nAuthorization: krun-secret:KEY\r\nContent-Length: 0\r\n\r\n");
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            client.read_to_end(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(String::from_utf8_lossy(&response).contains("200 OK"));
+        let received = String::from_utf8(receiver.await.unwrap()).unwrap();
+        assert!(!received.contains("POST"));
+        assert!(!received.contains("HOST_SECRET"));
     }
 }

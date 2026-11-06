@@ -49,6 +49,12 @@ fn extract_tar_archive<R: Read>(reader: R, root_dir: &Path) -> Result<()> {
         let entry_type = entry.header().entry_type();
         match entry_type {
             EntryType::Directory => {
+                if target_path.is_symlink() {
+                    anyhow::bail!(
+                        "Directory entry targets a symlink: {}",
+                        target_path.display()
+                    );
+                }
                 fs::create_dir_all(&target_path)?;
                 #[cfg(unix)]
                 {
@@ -61,9 +67,10 @@ fn extract_tar_archive<R: Read>(reader: R, root_dir: &Path) -> Result<()> {
                 if let Some(parent) = target_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                // Avoid overwriting through an existing symlink leaf
-                if target_path.is_symlink() {
-                    let _ = fs::remove_file(&target_path);
+                // Unlink existing leaves before writing: truncating an existing hard link
+                // could modify a file outside the extraction root.
+                if target_path.exists() || target_path.is_symlink() {
+                    fs::remove_file(&target_path)?;
                 }
                 let mut out_file = File::create(&target_path)
                     .with_context(|| format!("Failed to create file {}", target_path.display()))?;
@@ -87,7 +94,7 @@ fn extract_tar_archive<R: Read>(reader: R, root_dir: &Path) -> Result<()> {
                     fs::create_dir_all(parent)?;
                 }
                 if target_path.exists() || target_path.is_symlink() {
-                    let _ = fs::remove_file(&target_path);
+                    fs::remove_file(&target_path)?;
                 }
                 if let Some(link_target) = entry.link_name()? {
                     validate_symlink_target(root_dir, &target_path, &link_target)?;
@@ -99,14 +106,27 @@ fn extract_tar_archive<R: Read>(reader: R, root_dir: &Path) -> Result<()> {
                 // Hard link with fallback to copy
                 if let Some(link_target) = entry.link_name()? {
                     let src_path = sanitize_tar_path(root_dir, &link_target)?;
+                    ensure_no_symlink_parents(root_dir, &src_path)?;
+                    let source_metadata = fs::symlink_metadata(&src_path)?;
+                    if !source_metadata.is_file() {
+                        anyhow::bail!(
+                            "Hard link source must be a regular file: {}",
+                            src_path.display()
+                        );
+                    }
+                    if src_path == target_path {
+                        anyhow::bail!("Hard link cannot target itself");
+                    }
                     if let Some(parent) = target_path.parent() {
                         fs::create_dir_all(parent)?;
                     }
                     if target_path.exists() || target_path.is_symlink() {
-                        let _ = fs::remove_file(&target_path);
+                        fs::remove_file(&target_path)?;
                     }
                     if fs::hard_link(&src_path, &target_path).is_err() {
-                        let _ = fs::copy(&src_path, &target_path);
+                        fs::copy(&src_path, &target_path).with_context(|| {
+                            format!("Failed to copy hard link source {}", src_path.display())
+                        })?;
                     }
                 }
             }
@@ -128,11 +148,15 @@ fn extract_tar_archive<R: Read>(reader: R, root_dir: &Path) -> Result<()> {
 pub fn ensure_tmp_sticky_bit(root_dir: &Path) -> Result<()> {
     for tmp_rel in &["tmp", "var/tmp"] {
         let p = root_dir.join(tmp_rel);
-        let _ = fs::create_dir_all(&p);
+        ensure_no_symlink_parents(root_dir, &p)?;
+        if p.is_symlink() {
+            anyhow::bail!("Temporary directory targets a symlink: {}", p.display());
+        }
+        fs::create_dir_all(&p)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&p, fs::Permissions::from_mode(0o1777));
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o1777))?;
         }
     }
     Ok(())
@@ -176,5 +200,109 @@ mod tests {
             assert_eq!(tmp_mode, 0o1777);
             assert_eq!(var_tmp_mode, 0o1777);
         }
+    }
+
+    fn archive_entry(path: &str, kind: EntryType, link: Option<&str>, data: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_path(path).unwrap();
+        header.set_entry_type(kind);
+        header.set_mode(0o755);
+        header.set_size(data.len() as u64);
+        if let Some(link) = link {
+            header.set_link_name(link).unwrap();
+        }
+        header.set_cksum();
+        builder.append(&header, data).unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn directory_entry_cannot_chmod_host_through_symlink() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        let archive = archive_entry("escape", EntryType::Directory, None, b"");
+        assert!(extract_layer(archive.as_slice(), &root, false).is_err());
+        assert_eq!(
+            fs::metadata(outside).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn hard_link_sources_cannot_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("secret"), b"host secret").unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        symlink(outside.join("secret"), root.join("leaf")).unwrap();
+        for source in ["escape/secret", "leaf"] {
+            let archive = archive_entry("stolen", EntryType::Link, Some(source), b"");
+            assert!(extract_layer(archive.as_slice(), &root, false).is_err());
+            assert!(!root.join("stolen").exists());
+        }
+    }
+
+    #[test]
+    fn overwriting_hard_link_does_not_modify_original() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let outside = temp.path().join("host-file");
+        fs::write(&outside, b"keep").unwrap();
+        fs::hard_link(&outside, root.join("file")).unwrap();
+        let archive = archive_entry("file", EntryType::Regular, None, b"replace");
+        extract_layer(archive.as_slice(), &root, false).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"keep");
+        assert_eq!(fs::read(root.join("file")).unwrap(), b"replace");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn tmp_setup_cannot_follow_host_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        for path in ["tmp", "var"] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("root");
+            let outside = temp.path().join("outside");
+            fs::create_dir(&root).unwrap();
+            fs::create_dir(&outside).unwrap();
+            fs::set_permissions(&outside, fs::Permissions::from_mode(0o700)).unwrap();
+            symlink(&outside, root.join(path)).unwrap();
+            assert!(ensure_tmp_sticky_bit(&root).is_err());
+            assert_eq!(
+                fs::metadata(&outside).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert!(!outside.join("tmp").exists());
+        }
+    }
+
+    #[test]
+    fn valid_hard_link_is_extracted() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("source"), b"data").unwrap();
+        let archive = archive_entry("nested/link", EntryType::Link, Some("source"), b"");
+        extract_layer(archive.as_slice(), temp.path(), false).unwrap();
+        assert_eq!(fs::read(temp.path().join("nested/link")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn missing_hard_link_source_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = archive_entry("link", EntryType::Link, Some("missing"), b"");
+        assert!(extract_layer(archive.as_slice(), temp.path(), false).is_err());
     }
 }

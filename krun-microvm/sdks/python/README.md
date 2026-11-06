@@ -37,3 +37,15 @@ def run_secure_agent(user_prompt: str) -> dict:
 result = run_secure_agent("Analyze market data")
 print("Result from microVM:", result)
 ```
+
+## Result protocol and trust boundary
+
+Guest results use base64-encoded JSON, limited to 8 MiB after decoding. Return
+JSON-compatible values (objects, arrays, strings, finite numbers, booleans, or
+null); arbitrary Python objects and legacy pickle results are rejected. The host
+never unpickles guest output. Function and argument serialization into the guest
+still uses pickle and requires trusted host callables and an importable function
+definition in the guest image.
+
+Captured stdout and stderr share a 16 MiB limit. Excess output terminates the
+CLI and raises `MicroVmExecutionError`; configured timeouts still apply.

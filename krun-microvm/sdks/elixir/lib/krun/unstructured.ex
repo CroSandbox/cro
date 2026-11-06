@@ -3,13 +3,11 @@
 
 defmodule Krun.Unstructured do
   @moduledoc """
-  Hardware-Isolated Unstructured Document Intake, Partitioning, and AI Threat Shield.
+  Local text partitioning and heuristic detection of known threat patterns.
 
-  Provides unstructured document parsing (PDF, Word DOCX, Markdown, Text, JSON, YAML)
-  into structured element schemas (Title, NarrativeText, Header, ListItem, Table)
-  combined with real-time AI Agent threat scanning (indirect prompt injections,
-  SSRF cloud metadata exfiltration, zero-width steganography, and token ceiling exhaustion)
-  executed inside ephemeral `libkrun` microVM sandboxes with Cloudflare Pingora zero-trust egress.
+  This module does not boot a microVM or implement PDF/DOCX decoding. Its
+  `detonate/2` report is a simulation and does not establish document safety.
+  Input strings are content; trusted SDK callers may explicitly use `read_file: true`.
   """
 
   @type element :: %{
@@ -43,10 +41,13 @@ defmodule Krun.Unstructured do
 
   # Known prompt injection signatures
   @prompt_injection_patterns [
-    {~r/ignore\s+(all\s+)?previous\s+instructions/i, "Direct Instruction Hijack ('Ignore previous instructions')"},
+    {~r/ignore\s+(all\s+)?previous\s+instructions/i,
+     "Direct Instruction Hijack ('Ignore previous instructions')"},
     {~r/system\s+(override|directive|prompt\s+leak)/i, "System Override Directive"},
-    {~r/dump\s+(all\s+)?(system|internal)\s+(prompt|keys|credentials)/i, "Credential / Prompt Exfiltration Request"},
-    {~r/you\s+are\s+now\s+(an?\s+)?unrestricted\s+agent/i, "Jailbreak Roleplay Assertion ('unrestricted agent')"},
+    {~r/dump\s+(all\s+)?(system|internal)\s+(prompt|keys|credentials)/i,
+     "Credential / Prompt Exfiltration Request"},
+    {~r/you\s+are\s+now\s+(an?\s+)?unrestricted\s+agent/i,
+     "Jailbreak Roleplay Assertion ('unrestricted agent')"},
     {~r/\[SYSTEM_INSTRUCTION_OVERRIDE\]/i, "Delimited System Tag Injection"}
   ]
 
@@ -66,7 +67,7 @@ defmodule Krun.Unstructured do
   """
   @spec partition(String.t() | binary(), keyword()) :: {:ok, [element()]} | {:error, String.t()}
   def partition(input, opts \\ []) do
-    raw_text = extract_text(input)
+    raw_text = extract_text(input, opts)
     filename = Keyword.get(opts, :filename, "document.txt")
 
     lines = String.split(raw_text, ~r/\r?\n/)
@@ -83,7 +84,7 @@ defmodule Krun.Unstructured do
   """
   @spec scan_threats(String.t() | binary(), keyword()) :: {:ok, map()}
   def scan_threats(input, opts \\ []) do
-    raw_text = extract_text(input)
+    raw_text = extract_text(input, opts)
     filename = Keyword.get(opts, :filename, "document.txt")
 
     threats = detect_threats(raw_text)
@@ -111,12 +112,13 @@ defmodule Krun.Unstructured do
   end
 
   @doc """
-  Executes full hardware-isolated document intake, detonation, and partitioning.
-  Simulates or launches the ephemeral `libkrun` microVM sandbox with Pingora egress proxy.
+  Returns a local text-analysis simulation. This does not launch a microVM,
+  measure isolation, or establish that a document is safe.
+  Strings are literal content unless `read_file: true` is explicitly supplied.
   """
   @spec detonate(String.t() | binary(), keyword()) :: {:ok, report()}
   def detonate(input, opts \\ []) do
-    raw_text = extract_text(input)
+    raw_text = extract_text(input, opts)
     filename = Keyword.get(opts, :filename, "untrusted_document.pdf")
     filesize_bytes = byte_size(raw_text)
     filesize_str = format_bytes(filesize_bytes)
@@ -139,30 +141,27 @@ defmodule Krun.Unstructured do
 
     {threat_title, threat_desc} =
       if is_threat do
-        {"CRITICAL THREAT: Prompt Injection Quarantined in MicroVM",
-         "Discovered #{length(threats)} threat vector(s). Neutralized inside isolated Apple Silicon / KVM container before reaching LLM."}
+        {"SIMULATION: Potential Threat Patterns Detected",
+         "Found #{length(threats)} text pattern(s). No microVM execution or containment was performed."}
       else
-        {"VERIFIED CLEAN: Document Safe for Agent Ingestion",
-         "0 prompt injections, 0 zero-width anomalies, and 0 unauthorized network beacons detected."}
+        {"SIMULATION: No Known Text Patterns Detected",
+         "Pattern matching cannot establish document safety. No microVM execution was performed."}
       end
-
-    vm_id = "vm-sec-" <> (:crypto.strong_rand_bytes(3) |> Base.encode16(case: :lower))
-    boot_time = "#{:rand.uniform(10) + 68}.#{:rand.uniform(9)} ms"
 
     lines = String.split(raw_text, ~r/\r?\n/)
     elements = parse_elements(lines, filename)
     sanitized = sanitize_text(raw_text)
 
     telemetry = %{
-      instance_id: vm_id,
-      cold_boot_latency: boot_time,
-      memory_rss: "#{16 + :rand.uniform(6)}.#{:rand.uniform(9)} MB / 512 MB",
-      virtiofs_cow: "apfs_clonefile (isolated)",
-      egress_engine: "Cloudflare Pingora 0.9.0 L7",
-      llm_token_meter: "#{max(12, div(byte_size(sanitized), 4))} / 10,000 max"
+      instance_id: nil,
+      cold_boot_latency: nil,
+      memory_rss: nil,
+      virtiofs_cow: "not measured",
+      egress_engine: "not active",
+      llm_token_meter: "not active"
     }
 
-    guest_logs = generate_guest_logs(filename, boot_time, threats, is_threat)
+    guest_logs = ["SIMULATION ONLY: local text analysis; no guest was started."]
 
     diff =
       if is_threat do
@@ -176,10 +175,12 @@ defmodule Krun.Unstructured do
         --workspace-cow ./inbox:/docs \\
         --allow-host api.openai.com:443 \\
         --max-tokens 5000 \\
-        alpine:latest -- sh -c "pdftotext /docs/#{filename} /docs/extracted.txt"
+        alpine:latest -- sh -c "pdftotext /docs/input.pdf /docs/extracted.txt"
     """
 
     report = %{
+      execution_mode: "simulation",
+      isolation_verified: false,
       filename: filename,
       filesize: filesize_str,
       hash: sha256,
@@ -203,15 +204,9 @@ defmodule Krun.Unstructured do
   # Private Helpers
   # =========================================================================
 
-  defp extract_text(input) when is_binary(input) do
-    if File.exists?(input) and not File.dir?(input) do
-      case File.read(input) do
-        {:ok, content} -> content
-        {:error, _} -> input
-      end
-    else
-      input
-    end
+  # Treat API-supplied strings as content. File reads require an explicit local SDK option.
+  defp extract_text(input, opts) when is_binary(input) do
+    if Keyword.get(opts, :read_file, false), do: File.read!(input), else: input
   end
 
   defp parse_elements(lines, filename) do
@@ -222,7 +217,11 @@ defmodule Krun.Unstructured do
     |> Enum.map(fn {line, idx} ->
       cond do
         String.starts_with?(line, ["#", "##", "###"]) ->
-          %{type: "Header", text: String.trim_leading(line, "#") |> String.trim(), metadata: %{element_id: idx, filename: filename}}
+          %{
+            type: "Header",
+            text: String.trim_leading(line, "#") |> String.trim(),
+            metadata: %{element_id: idx, filename: filename}
+          }
 
         idx == 1 and String.length(line) < 120 ->
           %{type: "Title", text: line, metadata: %{element_id: idx, filename: filename}}
@@ -252,7 +251,8 @@ defmodule Krun.Unstructured do
               %{
                 title: label,
                 severity: "Critical",
-                desc: "Matches known prompt injection pattern attempting to hijack agent instructions.",
+                desc:
+                  "Matches known prompt injection pattern attempting to hijack agent instructions.",
                 payload: matched
               }
               | acc
@@ -272,7 +272,8 @@ defmodule Krun.Unstructured do
               %{
                 title: label,
                 severity: "Critical",
-                desc: "Outbound target to internal cloud metadata endpoint. Intercepted by Pingora egress filter.",
+                desc:
+                  "Outbound target to internal cloud metadata endpoint. Intercepted by Pingora egress filter.",
                 payload: matched
               }
               | acc
@@ -292,7 +293,8 @@ defmodule Krun.Unstructured do
           %{
             title: "Invisible Zero-Width Unicode Steganography",
             severity: "Warning",
-            desc: "Document contains invisible zero-width characters (U+200B/U+200C/U+200D) encoding hidden data.",
+            desc:
+              "Document contains invisible zero-width characters (U+200B/U+200C/U+200D) encoding hidden data.",
             payload: "Zero-width sequence detected in document stream"
           }
         ]
@@ -314,38 +316,6 @@ defmodule Krun.Unstructured do
     Enum.reduce(@zero_width_chars, sanitized, fn char, acc ->
       String.replace(acc, char, "")
     end)
-  end
-
-  defp generate_guest_logs(filename, boot_time, threats, is_threat) do
-    base = [
-      "[    0.000000] Linux version 6.6.30-asahi-krun (root@runner) #1 SMP PREEMPT",
-      "[    0.012100] Apple Silicon Hypervisor.framework hardware boundary ready",
-      "[    0.024500] virtio-fs: mounting host file under /sandbox with APFS clonefile CoW",
-      "[    0.071200] init.krun: started microVM PID 1 in #{boot_time}",
-      "[    0.082400] parser: reading /sandbox/#{filename} into memory buffer"
-    ]
-
-    middle =
-      if is_threat do
-        [
-          "[PingoraEgress] Evaluated outbound destination rules...",
-          "[PingoraEgress] Blocked unauthorized network egress: 169.254.169.254:80 (403 Forbidden)",
-          "[AI-SHIELD] DETECTED: #{length(threats)} prompt injection / exfil payload(s) in stream",
-          "[SANITIZER] Quarantined malicious blocks; extracted clean text elements"
-        ]
-      else
-        [
-          "[PingoraEgress] 0 outbound network requests initiated during parsing",
-          "[AI-SHIELD] Prompt Injection Radar: 0 anomalies detected. (Risk Score: 0/100)",
-          "[SANITIZER] Extracted clean structured elements"
-        ]
-      end
-
-    ending = [
-      "[    0.118900] microvm runner: exit status 0 (clean isolation shutdown)"
-    ]
-
-    base ++ middle ++ ending
   end
 
   defp format_bytes(bytes) when bytes < 1024, do: "#{bytes} B"

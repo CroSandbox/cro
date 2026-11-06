@@ -38,3 +38,6 @@ payloads/
 **/deps/
 *.ez
 .elixir_ls/
+
+# Node SDK development dependencies
+node_modules/

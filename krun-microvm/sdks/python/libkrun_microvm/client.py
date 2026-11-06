@@ -3,6 +3,8 @@
 import os
 import shutil
 import subprocess
+import selectors
+import time
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Union
 from .exceptions import MicroVmBinaryNotFoundError, MicroVmExecutionError, MicroVmTimeoutError
@@ -98,6 +100,8 @@ def build_run_args(
 
     return args
 
+MAX_CAPTURE_BYTES = 16 * 1024 * 1024
+
 def execute_microvm_command(
     args: List[str],
     binary_path: Optional[str] = None,
@@ -109,14 +113,40 @@ def execute_microvm_command(
     full_cmd = [bin_path] + args
 
     try:
-        proc = subprocess.run(
-            full_cmd,
-            stdout=subprocess.PIPE if capture_output else None,
-            stderr=subprocess.PIPE if capture_output else None,
-            text=True,
-            timeout=timeout,
-            check=False,
+        if not capture_output:
+            return subprocess.run(full_cmd, text=True, timeout=timeout, check=False)
+
+        # Drain both pipes concurrently with a shared limit. communicate()/run()
+        # otherwise buffer arbitrary guest output in host memory.
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with subprocess.Popen(full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
+            stdout = bytearray()
+            stderr = bytearray()
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(proc.stdout, selectors.EVENT_READ, stdout)
+                    selector.register(proc.stderr, selectors.EVENT_READ, stderr)
+                    while selector.get_map():
+                        remaining = None if deadline is None else deadline - time.monotonic()
+                        if remaining is not None and remaining <= 0:
+                            raise subprocess.TimeoutExpired(full_cmd, timeout)
+                        for key, _events in selector.select(remaining):
+                            chunk = os.read(key.fd, 65536)
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                                continue
+                            if len(stdout) + len(stderr) + len(chunk) > MAX_CAPTURE_BYTES:
+                                raise MicroVmExecutionError("MicroVM output exceeds the 16 MiB capture limit")
+                            key.data.extend(chunk)
+                remaining = None if deadline is None else max(0, deadline - time.monotonic())
+                returncode = proc.wait(timeout=remaining)
+            except BaseException:
+                proc.kill()
+                proc.wait()
+                raise
+        return subprocess.CompletedProcess(
+            full_cmd, returncode, stdout.decode("utf-8", errors="replace"),
+            stderr.decode("utf-8", errors="replace"),
         )
-        return proc
     except subprocess.TimeoutExpired as e:
         raise MicroVmTimeoutError(f"MicroVM execution timed out after {timeout} seconds") from e
