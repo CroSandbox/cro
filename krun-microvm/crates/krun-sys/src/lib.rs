@@ -1,3 +1,6 @@
+/// True only when this binary uses the explicit non-virtualizing test stub.
+pub const USING_TEST_STUB: bool = cfg!(libkrun_stub);
+
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 use std::path::Path;

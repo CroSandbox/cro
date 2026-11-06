@@ -1,14 +1,14 @@
 use super::dockerignore::Dockerignore;
 use super::parser::{Dockerfile, Instruction};
+use super::run::BuildVmExecutor;
+use crate::config::KrunConfig;
 use crate::config::OciConfig;
-use crate::exec::{exec_in_guest_rootfs, ExecRequest};
 use crate::oci::cache::{CacheEntry, CacheKind};
 use crate::oci::client::OciClient;
 use crate::oci::reference::ImageReference;
 use crate::rootfs::clone_rootfs;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -231,12 +231,14 @@ struct BuildStage {
     config: OciConfig,
     workdir: PathBuf,
     env: HashMap<String, String>,
+    _directory: tempfile::TempDir,
 }
 
 /// Primary build engine executing Dockerfiles.
 pub struct BuildEngine {
     options: BuildOptions,
     oci_client: OciClient,
+    run_executor: BuildVmExecutor,
 }
 
 impl BuildEngine {
@@ -244,7 +246,14 @@ impl BuildEngine {
         Self {
             options,
             oci_client: OciClient::new(),
+            run_executor: BuildVmExecutor::default(),
         }
+    }
+
+    /// Set the maximum duration of each isolated RUN step (default: 10 minutes).
+    pub fn with_run_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.run_executor.timeout = timeout;
+        self
     }
 
     /// Executes the build process.
@@ -315,8 +324,7 @@ impl BuildEngine {
                     stage.config.working_dir = Some(new_wd.to_string_lossy().to_string());
 
                     // Ensure directory exists in guest rootfs
-                    let rel_wd = new_wd.strip_prefix("/").unwrap_or(&new_wd);
-                    let target_dir = stage.rootfs.join(rel_wd);
+                    let target_dir = secure_resolve_in_base(&stage.rootfs, &new_wd)?;
                     fs::create_dir_all(&target_dir).with_context(|| {
                         format!("Failed to create WORKDIR {}", target_dir.display())
                     })?;
@@ -416,25 +424,20 @@ impl BuildEngine {
                     let env_vec: Vec<String> =
                         stage.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
 
-                    let req = ExecRequest::new(cmd_args.clone())
-                        .with_env(env_vec)
-                        .with_workdir(stage.workdir.to_string_lossy().to_string());
-
-                    let resp = exec_in_guest_rootfs(&stage.rootfs, &req)
-                        .await
-                        .with_context(|| {
-                            format!("Failed to execute RUN command: {:?}", cmd_args)
-                        })?;
-
-                    if resp.exit_code != 0 {
-                        eprintln!("{}", resp.stdout);
-                        eprintln!("{}", resp.stderr);
-                        bail!(
-                            "The command '{:?}' returned a non-zero code: {}",
-                            cmd_args,
-                            resp.exit_code
-                        );
+                    if let Some(user) = stage.config.user.as_deref() {
+                        if !matches!(user, "root" | "0" | "0:0" | "root:root") {
+                            bail!("RUN with USER {user:?} is not supported by the build VM; refusing to execute as a different user");
+                        }
                     }
+                    let command = KrunConfig::new(
+                        cmd_args,
+                        env_vec,
+                        Some(stage.workdir.to_string_lossy().to_string()),
+                    );
+                    self.run_executor
+                        .execute(&stage.rootfs, command, &self.options.cache_base)
+                        .await
+                        .context("Executing Dockerfile RUN in a microVM")?;
                 }
                 Instruction::Cmd(cmd_form) => {
                     tracing::info!(
@@ -476,12 +479,8 @@ impl BuildEngine {
         // Invariant from Phase 1 & 2: Ensure /tmp and /var/tmp exist with 0o1777 sticky bits
         crate::rootfs::extract::ensure_tmp_sticky_bit(&final_stage.rootfs)?;
 
-        // Compute image digest based on final config and timestamp
-        let config_bytes = serde_json::to_vec_pretty(&final_stage.config)?;
-        let mut hasher = Sha256::new();
-        hasher.update(&config_bytes);
-        let digest_hex = hex::encode(hasher.finalize());
-        let digest = format!("sha256:{digest_hex}");
+        // RUN/COPY changes must contribute to image identity, even with identical config.
+        let digest = super::digest::build_digest(&final_stage.rootfs, &final_stage.config)?;
         let cache =
             CacheEntry::acquire_async(&self.options.cache_base, CacheKind::Image, &digest).await?;
         let target_rootfs = cache.path().to_path_buf();
@@ -512,13 +511,15 @@ impl BuildEngine {
         image: &str,
         stages: &HashMap<String, BuildStage>,
     ) -> Result<BuildStage> {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let staging_id = format!("build_stage_{}_{}", std::process::id(), nonce);
-        let staging_rootfs = self.options.cache_base.join("staging").join(staging_id);
-        fs::create_dir_all(&staging_rootfs)?;
+        use std::os::unix::fs::PermissionsExt;
+        let parent = self.options.cache_base.join("staging");
+        fs::create_dir_all(&parent)?;
+        let staging_directory = tempfile::Builder::new()
+            .prefix("build-stage-")
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir_in(parent)?;
+        let staging_rootfs = staging_directory.path().join("rootfs");
+        fs::create_dir(&staging_rootfs)?;
 
         if image == "scratch" {
             let empty_cfg = OciConfig::default();
@@ -527,6 +528,7 @@ impl BuildEngine {
                 config: empty_cfg,
                 workdir: PathBuf::from("/"),
                 env: HashMap::new(),
+                _directory: staging_directory,
             });
         }
 
@@ -538,6 +540,7 @@ impl BuildEngine {
                 config: prev.config.clone(),
                 workdir: prev.workdir.clone(),
                 env: prev.env.clone(),
+                _directory: staging_directory,
             });
         }
 
@@ -573,6 +576,7 @@ impl BuildEngine {
             config: oci_config,
             workdir: initial_workdir,
             env: env_map,
+            _directory: staging_directory,
         })
     }
 
@@ -916,5 +920,70 @@ mod tests {
             let err_msg = result.err().unwrap().to_string();
             assert!(err_msg.contains("Path containment violation") || err_msg.contains("outside"));
         }
+    }
+
+    #[tokio::test]
+    async fn failed_isolated_run_cannot_touch_host_or_publish_a_tag() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let context = temp.path().join("context");
+        let cache = temp.path().join("cache");
+        fs::create_dir(&context).unwrap();
+        let sentinel = temp.path().join("host-sentinel");
+        fs::write(
+            context.join("Dockerfile"),
+            format!("FROM scratch\nRUN touch '{}'\n", sentinel.display()),
+        )
+        .unwrap();
+        let runner = temp.path().join("runner");
+        fs::write(&runner, "#!/bin/sh\nexit 73\n").unwrap();
+        fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut engine =
+            BuildEngine::new(BuildOptions::new(&context, &cache).with_tag("unsafe:latest"));
+        engine.run_executor.runner = Some(runner);
+        let result = engine.build().await;
+        assert!(result.is_err());
+        assert!(!sentinel.exists());
+        assert!(LocalImageRegistry::load(&cache)
+            .lookup("unsafe:latest")
+            .is_none());
+        assert_eq!(fs::read_dir(cache.join("staging")).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn workdir_cannot_create_directories_outside_build_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = temp.path().join("context");
+        let cache = temp.path().join("cache");
+        fs::create_dir(&context).unwrap();
+        fs::write(
+            context.join("Dockerfile"),
+            "FROM scratch\nWORKDIR /../../outside\n",
+        )
+        .unwrap();
+        assert!(BuildEngine::new(BuildOptions::new(&context, &cache))
+            .build()
+            .await
+            .is_err());
+        assert!(!temp.path().join("outside").exists());
+        assert_eq!(fs::read_dir(cache.join("staging")).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn run_cannot_silently_ignore_non_root_user() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = temp.path().join("context");
+        let cache = temp.path().join("cache");
+        fs::create_dir(&context).unwrap();
+        fs::write(
+            context.join("Dockerfile"),
+            "FROM scratch\nUSER 1000\nRUN true\n",
+        )
+        .unwrap();
+        let error = BuildEngine::new(BuildOptions::new(&context, &cache))
+            .build()
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("USER"));
     }
 }

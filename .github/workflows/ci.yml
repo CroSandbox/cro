@@ -226,6 +226,14 @@ jobs:
           FORCE_LIBKRUN_STUB: ${{ matrix.use_stub }}
         run: cargo test --locked --workspace --verbose
 
+      - name: Verify stub-to-native runner linking (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          FORCE_LIBKRUN_STUB=1 cargo build --locked -p microvm-runner
+          FORCE_LIBKRUN_STUB=0 cargo build --locked -p microvm-runner
+          otool -L target/debug/microvm-runner | grep -E 'libkrun(\.|-)'
+
+
   # =========================================================================
   #  Build Release Binaries (Strictly Native — No Stubs)
   # =========================================================================
