@@ -1557,6 +1557,15 @@ make prereqs
 # (or alias: make deps)
 ```
 
+This prepares dependencies and submodules without building, signing, or installing
+CLI binaries. You can also run `./install.sh --prereqs-only` directly.
+To install binaries you have already built, use `./install.sh --no-build`.
+
+Run the isolated installer regression checks without virtualization dependencies:
+```bash
+python3 -m unittest discover -s tests -v
+```
+
 #### Building Submodules from Source (Optional)
 If your distribution does not have pre-built `libkrun` packages or you need custom hypervisor modifications:
 ```bash

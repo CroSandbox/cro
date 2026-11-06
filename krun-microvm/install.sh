@@ -53,6 +53,7 @@ cd "$WORKSPACE_DIR"
 # --- Default Options ---
 BUILD_MODE="release"
 DO_BUILD=true
+PREREQS_ONLY=false
 SKIP_DEPS=false
 SKIP_SUBMODULES=false
 AUTO_YES=false
@@ -71,6 +72,7 @@ ${BOLD}OPTIONS:${NC}
     --prefix <DIR>       Destination directory for binaries (default: /usr/local/bin or ~/.local/bin)
     --debug              Build with debug profile instead of release
     --no-build           Skip cargo build (use already compiled binaries from target/)
+    --prereqs-only       Check/install prerequisites and update submodules, then exit
     --skip-deps          Skip checking/installing system dependencies (libkrun, rust, etc.)
     --skip-submodules    Skip updating git submodules (libkrun, libkrunfw)
     --no-sign            Skip macOS codesign with Hypervisor entitlements
@@ -90,11 +92,19 @@ ${BOLD}BINARIES INSTALLED:${NC}
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --prefix)
+            if [ "$#" -lt 2 ] || [ -z "$2" ] || [[ "$2" == -* ]]; then
+                log_error "--prefix requires a destination directory."
+                exit 1
+            fi
             PREFIX="$2"
             shift 2
             ;;
         --debug)
             BUILD_MODE="debug"
+            shift
+            ;;
+        --prereqs-only)
+            PREREQS_ONLY=true
             shift
             ;;
         --no-build)
@@ -163,7 +173,10 @@ if [ "$SKIP_SUBMODULES" = false ]; then
         log_step "Updating Git Submodules (libkrun & libkrunfw)"
         if command -v git &>/dev/null; then
             log_info "Ensuring submodules are checked out in $ROOT_DIR..."
-            (cd "$ROOT_DIR" && git submodule update --init --recursive) || log_warn "Git submodule update finished with warnings."
+            if ! (cd "$ROOT_DIR" && git submodule update --init --recursive); then
+                log_error "Git submodule update failed. Fix the error or use --skip-submodules to skip this step."
+                exit 1
+            fi
             log_success "Submodules verified."
         else
             log_warn "git command not found; skipping submodule update."
@@ -287,6 +300,11 @@ if [ "$SKIP_DEPS" = false ]; then
     fi
 else
     log_info "Skipping dependency checks (--skip-deps specified)."
+fi
+
+if [ "$PREREQS_ONLY" = true ]; then
+    log_success "Prerequisite checks completed. No binaries were built or installed."
+    exit 0
 fi
 
 # ==============================================================================
